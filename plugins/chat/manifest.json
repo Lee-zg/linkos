@@ -1,0 +1,19 @@
+{
+  "id": "chat.core",
+  "name": "聊天",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "entry": { "ui": "ui/index.js", "service": "service/index.js" },
+  "contributes": {
+    "routes": ["/chat"],
+    "commands": ["chat.send", "chat.search"],
+    "resourceTypes": ["chat.channel", "chat.message"],
+    "messageBlocks": ["file.reference", "code.reference", "run.result"]
+  },
+  "permissions": [
+    "resource.read:chat.*",
+    "resource.write:chat.message",
+    "event.subscribe:workspace.*"
+  ],
+  "network": { "mode": "deny" }
+}

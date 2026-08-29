@@ -1,0 +1,17 @@
+name: Feature request
+description: Propose an extension that fits the plugin-native model.
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed plugin or API change
+    validations:
+      required: true

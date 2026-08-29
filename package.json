@@ -1,0 +1,16 @@
+{
+  "name": "linkos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first, plugin-native collaboration workspace.",
+  "packageManager": "pnpm@9.15.5",
+  "scripts": {
+    "dev": "pnpm --filter @linkos/web dev",
+    "build": "pnpm --filter @linkos/web build",
+    "typecheck": "pnpm --filter @linkos/web typecheck",
+    "test:go": "go test ./services/gateway/... ./services/runner/..."
+  },
+  "devDependencies": {
+    "prettier": "^3.5.3"
+  }
+}

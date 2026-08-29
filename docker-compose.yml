@@ -1,0 +1,22 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - gateway
+    restart: unless-stopped
+  gateway:
+    build:
+      context: ./services/gateway
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+  runner:
+    build:
+      context: ./services/runner
+    ports:
+      - "9797:9797"
+    restart: unless-stopped
