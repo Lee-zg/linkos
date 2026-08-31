@@ -13,3 +13,8 @@ dist/
 coverage/
 tmp/
 *.tsbuildinfo
+
+.history
+
+# qoder生成文档注释
+.qoder/
