@@ -25,6 +25,101 @@ export interface DomainEvent<T = unknown> {
   payload: T;
 }
 
+/** Stable error identifiers shared by HTTP, WebSocket and plugin adapters. */
+export type ErrorCode =
+  | "AUTH_REQUIRED"
+  | "FORBIDDEN"
+  | "RESOURCE_VERSION_MISMATCH"
+  | "UPLOAD_PART_INVALID"
+  | "QUOTA_EXCEEDED"
+  | "JOB_POLICY_DENIED"
+  | "RUNNER_UNAVAILABLE"
+  | "PLUGIN_INCOMPATIBLE"
+  | "RATE_LIMITED"
+  | "INVALID_REQUEST"
+  | "INTERNAL_ERROR";
+
+export interface ApiErrorBody {
+  error: ErrorCode | string;
+  message: string;
+  details?: Record<string, unknown>;
+  traceId?: string;
+}
+
+export interface SessionToken {
+  accessToken: string;
+  expiresIn: number;
+  workspaceId: string;
+  userId: string;
+  displayName: string;
+  role: string;
+}
+
+export interface MessageCreateInput {
+  body: string;
+  channelId: string;
+  clientMsgId: string;
+}
+
+export interface AcceptedMessage {
+  messageId: string;
+  status: "accepted" | "duplicate";
+  serverMsgId?: string;
+  seq?: number;
+}
+
+export type UploadStatus =
+  | "created"
+  | "uploading"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export interface UploadCreateInput {
+  name: string;
+  size: number;
+  mimeType?: string;
+  contentHash?: string;
+  chunkSize?: number;
+}
+
+export interface UploadSession {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  chunkSize: number;
+  totalParts: number;
+  receivedParts: number[];
+  status: UploadStatus;
+  contentHash?: string;
+}
+
+export interface UploadPartInput {
+  partNo: number;
+  sha256: string;
+  size: number;
+}
+
+export interface UploadPartResult {
+  uploadId: string;
+  partNo: number;
+  accepted: boolean;
+  receivedParts: number[];
+}
+
+export interface UploadCompleteInput {
+  contentHash: string;
+}
+
+export interface UploadCompleteResult {
+  uploadId: string;
+  resourceId: string;
+  contentHash: string;
+  status: "completed";
+}
+
 export interface WorkspaceSnapshot {
   workspace: {
     id: string;
@@ -92,6 +187,7 @@ export interface JobRef {
 
 export const EVENT_TYPES = {
   workspaceReady: "workspace.ready",
+  workspaceSnapshotRequired: "workspace.snapshot.required",
   chatMessageCreated: "chat.message.created",
   jobStatusChanged: "job.status.changed",
   jobLogChunk: "job.log.chunk",

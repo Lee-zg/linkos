@@ -6,7 +6,7 @@ import { useToast } from "../os/Toaster";
 const channels = ["工程协作", "版本发布", "设计评审", "随手记录"];
 
 export function ChatApp() {
-  const { messages, sendMessage } = useWorkspace();
+  const { connected, messages, sendMessage } = useWorkspace();
   const toast = useToast();
   const [composer, setComposer] = useState("");
   const [channel, setChannel] = useState("工程协作");
@@ -18,10 +18,10 @@ export function ChatApp() {
 
   const onSend = () => {
     const body = composer.trim();
-    if (!body) return;
+    if (!body || !connected) return;
     sendMessage(body);
     setComposer("");
-    toast("消息已发送到 #工程协作");
+    toast(`消息已发送到 #${channel}`);
   };
 
   return (
@@ -52,6 +52,14 @@ export function ChatApp() {
             12 位成员 · 过去 7 天 1,284 条消息
           </p>
         </div>
+        {!connected && (
+          <div
+            className="mx-4 mt-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
+            role="alert"
+          >
+            当前处于离线状态，消息不会发送；连接恢复后可重试。
+          </div>
+        )}
         <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2">
           <ShieldCheck size={14} className="shrink-0 text-muted-foreground" />
           <p className="m-0 truncate text-xs text-muted-foreground">
@@ -88,12 +96,14 @@ export function ChatApp() {
                   onSend();
               }}
               placeholder={`发送消息到 #${channel}`}
+              aria-label={`发送消息到 #${channel}`}
               rows={1}
               className="max-h-32 min-w-0 flex-1 resize-none border-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
             <button
-              className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg border-none bg-primary text-primary-foreground hover:opacity-90"
+              className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg border-none bg-primary text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
               aria-label="发送消息"
+              disabled={!composer.trim() || !connected}
               onClick={onSend}
             >
               <Send size={15} />

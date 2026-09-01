@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,21 +22,99 @@ type event struct {
 	ActorID     string      `json:"actorId,omitempty"`
 	Payload     interface{} `json:"payload"`
 }
+
+// eventStore is intentionally small so the in-memory PoC can be replaced by
+// SQLite without changing WebSocket or HTTP handlers.
+type eventStore interface {
+	Append(kind string, payload interface{}) event
+	Since(afterSeq int64) (events []event, complete bool)
+	CurrentSeq() int64
+}
+
+// memoryEventStore is a bounded append-only history. The hub mutex is the
+// synchronization boundary for this implementation; a persistent store must
+// preserve the same append and replay semantics.
+type memoryEventStore struct {
+	capacity int
+	events   []event
+	seq      int64
+}
+
+func newMemoryEventStore(capacity int) *memoryEventStore {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &memoryEventStore{capacity: capacity}
+}
+
+func (s *memoryEventStore) Append(kind string, payload interface{}) event {
+	s.seq++
+	e := event{
+		V:           1,
+		Type:        kind,
+		EventID:     "evt_" + strconv.FormatInt(s.seq, 10) + "_" + time.Now().UTC().Format("20060102150405.000000000"),
+		Seq:         s.seq,
+		TS:          time.Now().UTC().Format(time.RFC3339Nano),
+		WorkspaceID: "demo",
+		ActorID:     "gateway",
+		Payload:     payload,
+	}
+	s.events = append(s.events, e)
+	if len(s.events) > s.capacity {
+		s.events = s.events[len(s.events)-s.capacity:]
+	}
+	return e
+}
+
+func (s *memoryEventStore) Since(afterSeq int64) ([]event, bool) {
+	if afterSeq < 0 {
+		afterSeq = 0
+	}
+	if afterSeq >= s.seq {
+		return nil, true
+	}
+	if len(s.events) == 0 {
+		return nil, false
+	}
+	oldest := s.events[0].Seq
+	if afterSeq < oldest-1 {
+		return nil, false
+	}
+	result := make([]event, 0, len(s.events))
+	for _, e := range s.events {
+		if e.Seq > afterSeq {
+			result = append(result, e)
+		}
+	}
+	return result, true
+}
+
+func (s *memoryEventStore) CurrentSeq() int64 { return s.seq }
+
 type hub struct {
 	mu      sync.Mutex
-	seq     int64
+	store   eventStore
 	clients map[*websocket.Conn]chan []byte
 }
 
-func newHub() *hub { return &hub{clients: make(map[*websocket.Conn]chan []byte)} }
-func (h *hub) emit(kind string, payload interface{}) {
+func newHub() *hub {
+	return &hub{store: newMemoryEventStore(1000), clients: make(map[*websocket.Conn]chan []byte)}
+}
+
+func newHubWithStore(store eventStore) *hub {
+	if store == nil {
+		store = newMemoryEventStore(1000)
+	}
+	return &hub{store: store, clients: make(map[*websocket.Conn]chan []byte)}
+}
+
+func (h *hub) emit(kind string, payload interface{}) event {
 	h.mu.Lock()
-	h.seq++
-	e := event{1, kind, "evt_" + time.Now().UTC().Format("20060102150405.000000000"), h.seq, time.Now().UTC().Format(time.RFC3339Nano), "demo", "gateway", payload}
+	e := h.store.Append(kind, payload)
 	b, err := json.Marshal(e)
 	if err != nil {
 		h.mu.Unlock()
-		return
+		return e
 	}
 	for _, queue := range h.clients {
 		select {
@@ -45,8 +124,23 @@ func (h *hub) emit(kind string, payload interface{}) {
 		}
 	}
 	h.mu.Unlock()
+	return e
 }
 func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.URL.Query().Get("workspace")
+	if workspaceID != "" && workspaceID != "demo" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workspace_not_found"})
+		return
+	}
+	lastSeq := int64(0)
+	if raw := r.URL.Query().Get("last_event_seq"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_last_event_seq"})
+			return
+		}
+		lastSeq = parsed
+	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -55,10 +149,26 @@ func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 	queue := make(chan []byte, 32)
 	h.mu.Lock()
 	h.clients[conn] = queue
-	currentSeq := h.seq
+	currentSeq := h.store.CurrentSeq()
+	history, replayable := h.store.Since(lastSeq)
 	h.mu.Unlock()
 	defer func() { h.mu.Lock(); delete(h.clients, conn); h.mu.Unlock(); close(queue); _ = conn.Close() }()
-	_ = conn.WriteJSON(event{1, "workspace.ready", "evt_boot", currentSeq, time.Now().UTC().Format(time.RFC3339Nano), "demo", "gateway", map[string]string{"message": "connected"}})
+	ready := event{1, "workspace.ready", systemEventID("ready", currentSeq), currentSeq, time.Now().UTC().Format(time.RFC3339Nano), "demo", "gateway", map[string]interface{}{"message": "connected", "replayable": replayable}}
+	if err := conn.WriteJSON(ready); err != nil {
+		return
+	}
+	if !replayable {
+		snapshotRequired := event{1, "workspace.snapshot.required", systemEventID("snapshot", currentSeq), currentSeq, time.Now().UTC().Format(time.RFC3339Nano), "demo", "gateway", map[string]interface{}{"lastEventSeq": lastSeq, "currentEventSeq": currentSeq}}
+		if err := conn.WriteJSON(snapshotRequired); err != nil {
+			return
+		}
+	} else {
+		for _, historicalEvent := range history {
+			if err := conn.WriteJSON(historicalEvent); err != nil {
+				return
+			}
+		}
+	}
 	go func() {
 		for message := range queue {
 			if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
@@ -73,8 +183,14 @@ func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func systemEventID(kind string, seq int64) string {
+	return "evt_" + kind + "_" + strconv.FormatInt(seq, 10) + "_" + strconv.FormatInt(time.Now().UTC().UnixNano(), 10)
+}
+
 func main() {
 	h := newHub()
+	uploads := newUploadStore(defaultUploadRoot())
+	auth := newAuthStore("demo")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"status": "ok", "service": "gateway", "time": time.Now().UTC()})
@@ -87,13 +203,27 @@ func main() {
 			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
 			return
 		}
-		writeJSON(w, 201, map[string]interface{}{"accessToken": "dev-token", "expiresIn": 3600, "workspaceId": "demo"})
+		var body struct {
+			WorkspaceID string `json:"workspaceId"`
+			DisplayName string `json:"displayName"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		principal, ok := auth.issue(body.WorkspaceID, body.DisplayName)
+		if !ok {
+			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create workspace session")
+			return
+		}
+		writeJSON(w, 201, map[string]interface{}{"accessToken": principal.Token, "expiresIn": int(sessionTTL.Seconds()), "workspaceId": principal.WorkspaceID, "userId": principal.UserID, "displayName": principal.DisplayName, "role": principal.Role})
 	})
-	mux.HandleFunc("/api/v1/workspaces/demo/snapshot", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, snapshot()) })
-	mux.HandleFunc("/api/v1/resources", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/workspaces/demo/snapshot", requireWorkspace(auth, "demo", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, snapshot()) }))
+	mux.HandleFunc("/api/v1/resources", requireWorkspace(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"items": []interface{}{map[string]string{"id": "file_release", "type": "file", "name": "release-candidate.tar.gz"}, map[string]string{"id": "project_gateway", "type": "code.project", "name": "api-gateway"}}, "nextCursor": ""})
-	})
-	mux.HandleFunc("/api/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/v1/uploads", requireWorkspace(auth, "demo", uploads.handleCollection))
+	mux.HandleFunc("/api/v1/uploads/", requireWorkspace(auth, "demo", uploads.handleItem))
+	mux.HandleFunc("/api/v1/messages", requireWorkspace(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
 			return
@@ -109,8 +239,8 @@ func main() {
 		}
 		h.emit("chat.message.created", map[string]string{"body": body.Body, "author": "你", "channelId": body.ChannelID, "clientMsgId": body.ClientMsgID})
 		writeJSON(w, 201, map[string]string{"messageId": "msg_local", "status": "accepted"})
-	})
-	mux.HandleFunc("/api/v1/jobs", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/api/v1/jobs", requireWorkspace(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
 			return
@@ -120,11 +250,11 @@ func main() {
 		id := "job_" + time.Now().UTC().Format("150405.000")
 		writeJSON(w, 202, map[string]interface{}{"id": id, "status": "queued", "runnerId": "runner-02"})
 		go simulateJob(h, id, spec)
-	})
-	mux.HandleFunc("/api/v1/plugins", func(w http.ResponseWriter, _ *http.Request) {
+	}))
+	mux.HandleFunc("/api/v1/plugins", requireWorkspace(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"items": []interface{}{plugin("files.core", "文件", "0.1.0"), plugin("chat.core", "聊天", "0.1.0"), plugin("code.workbench", "代码工作台", "0.1.0"), plugin("runner.exec", "运行任务", "0.1.0")}})
-	})
-	mux.HandleFunc("/api/v1/ws", h.handleWS)
+	}))
+	mux.HandleFunc("/api/v1/ws", requireWorkspace(auth, "demo", h.handleWS))
 	server := &http.Server{Addr: ":8787", Handler: cors(mux), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("LinkOS Gateway listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

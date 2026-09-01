@@ -59,7 +59,7 @@ function TaskRow({
 }
 
 export function TasksApp() {
-  const { jobStatus, runTask } = useWorkspace();
+  const { connected, jobStatus, runTask } = useWorkspace();
   const toast = useToast();
   const running = jobStatus === "running" || jobStatus === "preparing";
   const onRun = () => {
@@ -84,6 +84,14 @@ export function TasksApp() {
           <p className="m-0 mt-1.5 text-2xl font-semibold">42s</p>
         </div>
       </div>
+      {!connected && (
+        <div
+          className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
+          role="alert"
+        >
+          网关离线，暂时无法提交任务；连接恢复后可重试。
+        </div>
+      )}
       <div className="flex items-center gap-3 rounded-lg border bg-card p-4">
         <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-muted text-foreground/70">
           <ShieldCheck size={16} />
@@ -95,8 +103,9 @@ export function TasksApp() {
           </p>
         </div>
         <button
-          className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border-none bg-primary px-3 py-2 text-xs text-primary-foreground hover:opacity-90"
+          className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border-none bg-primary px-3 py-2 text-xs text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           onClick={onRun}
+          disabled={!connected || running}
         >
           {running ? (
             <RefreshCw size={13} className="animate-spin" />

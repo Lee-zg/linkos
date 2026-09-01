@@ -3,10 +3,34 @@ import type { ReactNode } from "react";
 import { useWorkspace } from "../lib/workspace";
 
 const activity = [
-  { id: "a1", actor: "林墨", action: "更新了", target: "api-gateway / websocket.go", time: "刚刚" },
-  { id: "a2", actor: "周予", action: "上传了", target: "release-candidate.tar.gz", time: "5 分钟前" },
-  { id: "a3", actor: "Runner 02", action: "完成了", target: "go test ./...", time: "12 分钟前" },
-  { id: "a4", actor: "陈一", action: "创建了频道", target: "#版本发布", time: "34 分钟前" },
+  {
+    id: "a1",
+    actor: "林墨",
+    action: "更新了",
+    target: "api-gateway / websocket.go",
+    time: "刚刚",
+  },
+  {
+    id: "a2",
+    actor: "周予",
+    action: "上传了",
+    target: "release-candidate.tar.gz",
+    time: "5 分钟前",
+  },
+  {
+    id: "a3",
+    actor: "Runner 02",
+    action: "完成了",
+    target: "go test ./...",
+    time: "12 分钟前",
+  },
+  {
+    id: "a4",
+    actor: "陈一",
+    action: "创建了频道",
+    target: "#版本发布",
+    time: "34 分钟前",
+  },
 ];
 
 function Metric({
@@ -62,10 +86,15 @@ function RunnerRow({
 }
 
 export function SystemApp() {
-  const { connected } = useWorkspace();
+  const { connected, lastSeq } = useWorkspace();
   return (
     <div className="flex flex-col gap-4 p-4">
-      <div className="flex items-center gap-3 rounded-lg border bg-card p-4">
+      <div
+        className={`flex items-center gap-3 rounded-lg border p-4 ${
+          connected ? "bg-card" : "border-warning/40 bg-warning/10"
+        }`}
+        role="status"
+      >
         <span className="grid h-9 w-9 place-items-center rounded-full border text-foreground/70">
           <Wifi size={16} />
         </span>
@@ -74,7 +103,10 @@ export function SystemApp() {
             {connected ? "网络稳定" : "连接已断开"}
           </p>
           <p className="m-0 text-xs text-muted-foreground">
-            Nimbus Lab · 局域网延迟 12 ms
+            Nimbus Lab ·{" "}
+            {connected
+              ? `局域网延迟 12 ms · 事件 ${lastSeq || "-"}`
+              : "正在尝试重新连接..."}
           </p>
         </div>
         <span
@@ -84,10 +116,30 @@ export function SystemApp() {
         </span>
       </div>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Metric label="在线成员" value="12" detail="+3 本周" icon={<Users size={14} />} />
-        <Metric label="工作区文件" value="42.1 GB" detail="68 个资源" icon={<HardDrive size={14} />} />
-        <Metric label="今日任务" value="18" detail="94.4% 成功" icon={<Zap size={14} />} />
-        <Metric label="活跃插件" value="6 / 8" detail="全部健康" icon={<Sparkles size={14} />} />
+        <Metric
+          label="在线成员"
+          value="12"
+          detail="+3 本周"
+          icon={<Users size={14} />}
+        />
+        <Metric
+          label="工作区文件"
+          value="42.1 GB"
+          detail="68 个资源"
+          icon={<HardDrive size={14} />}
+        />
+        <Metric
+          label="今日任务"
+          value="18"
+          detail="94.4% 成功"
+          icon={<Zap size={14} />}
+        />
+        <Metric
+          label="活跃插件"
+          value="6 / 8"
+          detail="全部健康"
+          icon={<Sparkles size={14} />}
+        />
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
         <section className="rounded-lg border bg-card p-4">
@@ -112,8 +164,17 @@ export function SystemApp() {
         <section className="rounded-lg border bg-card p-4">
           <h3 className="m-0 text-sm font-semibold">Runner 节点</h3>
           <div className="mt-1 divide-y">
-            <RunnerRow name="Runner 02" meta="Go 1.23 · 4 cores" status="空闲" />
-            <RunnerRow name="Runner 01" meta="Node 22 · 8 cores" status="运行中" busy />
+            <RunnerRow
+              name="Runner 02"
+              meta="Go 1.23 · 4 cores"
+              status="空闲"
+            />
+            <RunnerRow
+              name="Runner 01"
+              meta="Node 22 · 8 cores"
+              status="运行中"
+              busy
+            />
           </div>
           <div className="mt-3 border-t pt-3">
             <p className="m-0 text-xs text-muted-foreground">工作区存储</p>

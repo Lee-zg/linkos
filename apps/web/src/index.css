@@ -75,29 +75,66 @@
     overflow: hidden;
     font-family: var(--font-sans);
     color: var(--color-foreground);
-    background: var(--color-background);
+    background: #02040c;
     -webkit-font-smoothing: antialiased;
+  }
+  button,
+  textarea,
+  input,
+  select {
+    font: inherit;
+  }
+  button:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
   }
 }
 
 .wallpaper {
-  background:
-    radial-gradient(
-      ellipse 120% 80% at 70% -10%,
-      oklch(0.93 0.035 230) 0%,
-      transparent 55%
-    ),
-    radial-gradient(
-      ellipse 90% 70% at 10% 110%,
-      oklch(0.92 0.04 165) 0%,
-      transparent 60%
-    ),
-    radial-gradient(
-      ellipse 70% 60% at 95% 85%,
-      oklch(0.94 0.03 60) 0%,
-      transparent 55%
-    ),
-    linear-gradient(165deg, oklch(0.985 0.008 240), oklch(0.94 0.02 235));
+  isolation: isolate;
+  background-color: #02040c;
+  background-image:
+    linear-gradient(180deg, rgb(2 4 12 / 0.08), rgb(2 4 12 / 0.24)),
+    url("/wallpaper.png"),
+    radial-gradient(ellipse 120% 80% at 60% 112%, #1e3a8a 0%, transparent 58%),
+    linear-gradient(160deg, #02040c 0%, #081536 100%);
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+.wallpaper::after {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  content: "";
+  background: linear-gradient(
+    180deg,
+    rgb(0 0 0 / 0.08),
+    transparent 34%,
+    rgb(0 0 0 / 0.18)
+  );
+}
+
+.desktop-icons {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 92px);
+  grid-auto-rows: 86px;
+  align-content: start;
+  justify-content: start;
+  max-height: calc(100dvh - 96px);
+  overflow: hidden;
+}
+
+@media (max-width: 767px) {
+  .desktop-icons {
+    grid-template-columns: repeat(auto-fill, 84px);
+    grid-auto-rows: 82px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -40,16 +40,28 @@ function windowsReducer(
       const offset = (windows.length % 8) * 24;
       const viewportW = window.innerWidth;
       const viewportH = window.innerHeight;
-      const w = Math.min(app.defaultSize.w, viewportW - 32);
-      const h = Math.min(app.defaultSize.h, viewportH - 120);
+      const w = Math.min(
+        app.defaultSize.w,
+        Math.max(app.minSize.w, viewportW - 32),
+      );
+      const h = Math.min(
+        app.defaultSize.h,
+        Math.max(app.minSize.h, viewportH - 120),
+      );
       return [
         ...windows,
         {
           id: `${action.appId}-${windows.length}-${offset}`,
           appId: action.appId,
           title: app.name,
-          x: Math.max(16, (viewportW - w) / 2 + offset - 48),
-          y: Math.max(16, (viewportH - h) / 2 + offset - 72),
+          x: Math.max(
+            8,
+            Math.min(viewportW - 120, (viewportW - w) / 2 + offset - 48),
+          ),
+          y: Math.max(
+            8,
+            Math.min(viewportH - h - 88, (viewportH - h) / 2 + offset - 72),
+          ),
           w,
           h,
           minimized: false,
@@ -62,9 +74,7 @@ function windowsReducer(
       return windows.filter((w) => w.id !== action.id);
     case "FOCUS":
       return windows.map((w) =>
-        w.id === action.id
-          ? { ...w, minimized: false, z: nextZ(windows) }
-          : w,
+        w.id === action.id ? { ...w, minimized: false, z: nextZ(windows) } : w,
       );
     case "MINIMIZE":
       return windows.map((w) =>
@@ -106,8 +116,14 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
     (appId: AppId) => dispatch({ type: "OPEN", appId }),
     [],
   );
-  const close = useCallback((id: string) => dispatch({ type: "CLOSE", id }), []);
-  const focus = useCallback((id: string) => dispatch({ type: "FOCUS", id }), []);
+  const close = useCallback(
+    (id: string) => dispatch({ type: "CLOSE", id }),
+    [],
+  );
+  const focus = useCallback(
+    (id: string) => dispatch({ type: "FOCUS", id }),
+    [],
+  );
   const minimize = useCallback(
     (id: string) => dispatch({ type: "MINIMIZE", id }),
     [],
@@ -126,7 +142,16 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
     [],
   );
   const value = useMemo(
-    () => ({ windows, open, close, focus, minimize, toggleMaximize, move, resize }),
+    () => ({
+      windows,
+      open,
+      close,
+      focus,
+      minimize,
+      toggleMaximize,
+      move,
+      resize,
+    }),
     [windows, open, close, focus, minimize, toggleMaximize, move, resize],
   );
   return (
@@ -139,6 +164,8 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
 export function useWindowManager() {
   const ctx = useContext(WindowManagerContext);
   if (!ctx)
-    throw new Error("useWindowManager must be used within WindowManagerProvider");
+    throw new Error(
+      "useWindowManager must be used within WindowManagerProvider",
+    );
   return ctx;
 }

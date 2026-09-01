@@ -50,6 +50,7 @@ function TreeRow({
           : "bg-transparent text-muted-foreground hover:bg-accent/60"
       }`}
       style={{ paddingLeft: 8 + depth * 14 }}
+      aria-current={active ? "page" : undefined}
     >
       <span className="shrink-0 text-foreground/50">{icon}</span>
       {label}
@@ -58,7 +59,7 @@ function TreeRow({
 }
 
 export function CodeApp() {
-  const { jobStatus, runTask } = useWorkspace();
+  const { connected, jobStatus, runTask } = useWorkspace();
   const toast = useToast();
   const running = jobStatus === "running" || jobStatus === "preparing";
   const onRun = () => {
@@ -81,7 +82,12 @@ export function CodeApp() {
           <TreeRow icon={<Folder size={13} />} label="internal" />
           <TreeRow icon={<Folder size={13} />} label="events" depth={1} />
           <TreeRow icon={<FileCode2 size={13} />} label="hub.go" depth={1} />
-          <TreeRow icon={<FileCode2 size={13} />} label="websocket.go" depth={1} active />
+          <TreeRow
+            icon={<FileCode2 size={13} />}
+            label="websocket.go"
+            depth={1}
+            active
+          />
           <TreeRow icon={<Folder size={13} />} label="storage" />
           <TreeRow icon={<FileCode2 size={13} />} label="go.mod" />
           <TreeRow icon={<FileCode2 size={13} />} label="README.md" />
@@ -105,8 +111,10 @@ export function CodeApp() {
               <Copy size={14} />
             </button>
             <button
-              className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border-none bg-primary px-2.5 text-xs text-primary-foreground hover:opacity-90"
+              className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border-none bg-primary px-2.5 text-xs text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
               onClick={onRun}
+              disabled={!connected || running}
+              aria-label={running ? "运行测试中" : "运行测试"}
             >
               {running ? (
                 <RefreshCw size={13} className="animate-spin" />
@@ -123,6 +131,14 @@ export function CodeApp() {
           <span>Go</span>
           <span className="ml-auto">Ln 9, Col 4</span>
         </div>
+        {!connected && (
+          <div
+            className="border-b bg-warning/10 px-4 py-2 text-xs text-warning-foreground"
+            role="alert"
+          >
+            网关离线，代码保持只读；连接恢复后可继续运行任务。
+          </div>
+        )}
         <div className="min-h-0 flex-1 overflow-auto bg-muted/20 py-2 font-mono text-xs leading-6">
           {codeLines.map(([line, text], index) => (
             <div

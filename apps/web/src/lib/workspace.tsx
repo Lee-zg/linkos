@@ -4,10 +4,13 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
-import type { DomainEvent, JobStatus } from "@linkos/protocol";
+import type { JobSpec, JobStatus } from "@linkos/protocol";
+import { sendMessage as postMessage, submitJob } from "./api";
+import { useWorkspaceSocket, type SocketEvent } from "./useWorkspaceSocket";
 
 export type Message = {
   id: string;
@@ -42,8 +45,23 @@ const initialMessages: Message[] = [
   },
 ];
 
+const jobStatuses = new Set<JobStatus>([
+  "queued",
+  "preparing",
+  "running",
+  "succeeded",
+  "failed",
+  "canceled",
+  "timed_out",
+]);
+
+function isJobStatus(value: unknown): value is JobStatus {
+  return typeof value === "string" && jobStatuses.has(value as JobStatus);
+}
+
 type Workspace = {
   connected: boolean;
+  lastSeq: number;
   messages: Message[];
   sendMessage: (body: string) => void;
   jobStatus: JobStatus;
@@ -53,56 +71,71 @@ type Workspace = {
 const WorkspaceContext = createContext<Workspace | null>(null);
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const [connected, setConnected] = useState(true);
   const [messages, setMessages] = useState(initialMessages);
   const [jobStatus, setJobStatus] = useState<JobStatus>("succeeded");
+  const jobTimers = useRef<number[]>([]);
+  const localMessageIds = useRef(new Set<string>());
+  const messageCounter = useRef(0);
 
   useEffect(() => {
-    let socket: WebSocket | undefined;
-    try {
-      const p = window.location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(
-        `${p}://${window.location.host}/api/v1/ws?workspace=demo`,
-      );
-      socket.onopen = () => setConnected(true);
-      socket.onclose = () => setConnected(false);
-      socket.onerror = () => setConnected(false);
-      socket.onmessage = (raw) => {
-        try {
-          const event = JSON.parse(raw.data) as DomainEvent<{
-            body?: string;
-            author?: string;
-            clientMsgId?: string;
-          }>;
-          const messageBody = event.payload.body;
-          if (
-            event.type === "chat.message.created" &&
-            messageBody &&
-            !event.payload.clientMsgId
-          )
-            setMessages((current) => [
-              ...current,
-              {
-                id: event.eventId,
-                author: event.payload.author ?? "成员",
-                initials: "M",
-                body: messageBody,
-                time: "现在",
-                own: true,
-              },
-            ]);
-        } catch {
-          /* Ignore malformed demo events. */
-        }
-      };
-    } catch {
-      setConnected(false);
-    }
-    return () => socket?.close();
+    return () => {
+      jobTimers.current.forEach((timer) => window.clearTimeout(timer));
+      jobTimers.current = [];
+    };
   }, []);
 
+  const onSocketEvent = useCallback((event: SocketEvent) => {
+    if (event.type === "chat.message.created") {
+      const payload = event.payload as {
+        body?: string;
+        author?: string;
+        clientMsgId?: string;
+      };
+      if (!payload || typeof payload !== "object" || !payload.body) return;
+      if (
+        payload.clientMsgId &&
+        localMessageIds.current.has(payload.clientMsgId)
+      ) {
+        localMessageIds.current.delete(payload.clientMsgId);
+        return;
+      }
+      const messageBody = payload.body;
+      setMessages((current) => {
+        if (current.some((message) => message.id === event.eventId))
+          return current;
+        return [
+          ...current,
+          {
+            id: event.eventId,
+            author: payload.author ?? "成员",
+            initials: "M",
+            body: messageBody,
+            time: "现在",
+          },
+        ];
+      });
+    }
+    if (event.type === "job.status.changed") {
+      const payload = event.payload as { status?: unknown };
+      if (
+        payload &&
+        typeof payload === "object" &&
+        isJobStatus(payload.status)
+      ) {
+        setJobStatus(payload.status);
+      }
+    }
+  }, []);
+
+  const { connected, lastSeq } = useWorkspaceSocket({ onEvent: onSocketEvent });
+
   const sendMessage = useCallback((body: string) => {
-    const clientMsgId = `local-${Date.now()}`;
+    const clientMsgId = `local-${Date.now()}-${messageCounter.current++}`;
+    localMessageIds.current.add(clientMsgId);
+    if (localMessageIds.current.size > 100) {
+      const oldest = localMessageIds.current.values().next().value;
+      if (oldest) localMessageIds.current.delete(oldest);
+    }
     setMessages((current) => [
       ...current,
       {
@@ -114,41 +147,38 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         own: true,
       },
     ]);
-    fetch("/api/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ body, channelId: "engineering", clientMsgId }),
-    }).catch(() => undefined);
+    void postMessage({ body, channelId: "engineering", clientMsgId }).catch(
+      () => undefined,
+    );
   }, []);
 
   const runTask = useCallback(async () => {
+    jobTimers.current.forEach((timer) => window.clearTimeout(timer));
+    jobTimers.current = [];
     setJobStatus("preparing");
+    const spec: JobSpec = {
+      projectId: "api-gateway",
+      command: "go test ./...",
+      timeoutSeconds: 600,
+      memoryMb: 512,
+      network: "deny",
+    };
     try {
-      const res = await fetch("/api/v1/jobs", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: "api-gateway",
-          command: "go test ./...",
-          timeoutSeconds: 600,
-          memoryMb: 512,
-          network: "deny",
-        }),
-      });
-      if (res.ok)
-        setJobStatus(
-          ((await res.json()) as { status?: JobStatus }).status ?? "queued",
-        );
+      await submitJob(spec);
+      setJobStatus("preparing");
     } catch {
       setJobStatus("queued");
+      return;
     }
-    window.setTimeout(() => setJobStatus("running"), 650);
-    window.setTimeout(() => setJobStatus("succeeded"), 2600);
+    jobTimers.current = [
+      window.setTimeout(() => setJobStatus("running"), 650),
+      window.setTimeout(() => setJobStatus("succeeded"), 2600),
+    ];
   }, []);
 
   const value = useMemo(
-    () => ({ connected, messages, sendMessage, jobStatus, runTask }),
-    [connected, messages, sendMessage, jobStatus, runTask],
+    () => ({ connected, lastSeq, messages, sendMessage, jobStatus, runTask }),
+    [connected, lastSeq, messages, sendMessage, jobStatus, runTask],
   );
   return (
     <WorkspaceContext.Provider value={value}>

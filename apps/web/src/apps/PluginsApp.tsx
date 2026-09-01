@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Code2, Files, MessageSquare, Terminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { useWorkspace } from "../lib/workspace";
 import { useToast } from "../os/Toaster";
 
 type Plugin = {
@@ -53,14 +54,17 @@ const pluginSeed: Plugin[] = [
 ];
 
 export function PluginsApp() {
+  const { connected } = useWorkspace();
   const toast = useToast();
   const [plugins, setPlugins] = useState(pluginSeed);
   const onToggle = (id: string) => {
+    const plugin = plugins.find((item) => item.id === id);
+    if (!plugin) return;
+    const enabled = !plugin.enabled;
     setPlugins((current) =>
-      current.map((plugin) =>
-        plugin.id === id ? { ...plugin, enabled: !plugin.enabled } : plugin,
-      ),
+      current.map((item) => (item.id === id ? { ...item, enabled } : item)),
     );
+    toast(`${plugin.name}已${enabled ? "启用" : "停用"}`);
   };
   return (
     <div className="flex flex-col gap-4 p-4">
@@ -78,6 +82,14 @@ export function PluginsApp() {
           开发 SDK
         </button>
       </div>
+      {!connected && (
+        <div
+          className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
+          role="alert"
+        >
+          网关离线，插件状态可能不是最新；当前修改仅保存在本地。
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         {plugins.map((plugin) => {
           const Icon = plugin.icon;

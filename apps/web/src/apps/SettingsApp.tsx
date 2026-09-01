@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useWorkspace } from "../lib/workspace";
 import { useToast } from "../os/Toaster";
 
 function Row({
@@ -50,6 +51,7 @@ function Toggle({
 }
 
 export function SettingsApp() {
+  const { connected } = useWorkspace();
   const toast = useToast();
   const [notifications, setNotifications] = useState(true);
   const [autoStart, setAutoStart] = useState(false);
@@ -57,6 +59,14 @@ export function SettingsApp() {
     <div className="flex flex-col gap-4 p-4">
       <section className="rounded-lg border bg-card px-4 py-2">
         <h3 className="m-0 pt-2 text-sm font-semibold">工作区</h3>
+        {!connected && (
+          <p
+            className="m-0 mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
+            role="alert"
+          >
+            当前离线，工作区设置修改仅保存在本地。
+          </p>
+        )}
         <div className="divide-y">
           <Row
             label="工作区名称"
@@ -112,7 +122,9 @@ export function SettingsApp() {
           <Row
             label="关于"
             desc="LinkOS 0.1.0 · 本地优先的插件化协作工作区"
-            control={<span className="text-xs text-muted-foreground">0.1.0</span>}
+            control={
+              <span className="text-xs text-muted-foreground">0.1.0</span>
+            }
           />
         </div>
       </section>
