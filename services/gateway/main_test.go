@@ -100,3 +100,51 @@ func TestWebSocketRequestsSnapshotOutsideRetentionWindow(t *testing.T) {
 		t.Fatalf("expected snapshot requirement, got %#v", snapshotRequired)
 	}
 }
+
+func TestWebSocketReplaysAcrossRestart(t *testing.T) {
+	path := testSQLitePath(t)
+	beforeRestart, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	firstHub := newHubWithStore(newMemoryEventStoreWithBackend(eventRetention, beforeRestart))
+	firstHub.emit("chat.message.created", map[string]string{"body": "before restart"})
+	second := firstHub.emit("chat.message.created", map[string]string{"body": "still here"})
+	if err := beforeRestart.Close(); err != nil {
+		t.Fatalf("close backend: %v", err)
+	}
+
+	afterRestart, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatalf("reopen backend: %v", err)
+	}
+	defer afterRestart.Close()
+	secondHub := newHubWithStore(newMemoryEventStoreWithBackend(eventRetention, afterRestart))
+
+	server := httptest.NewServer(http.HandlerFunc(secondHub.handleWS))
+	defer server.Close()
+	url := "ws" + server.URL[len("http"):] + "?workspace=demo&last_event_seq=0"
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	var ready event
+	if err := conn.ReadJSON(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Type != "workspace.ready" || ready.Seq != second.Seq {
+		t.Fatalf("ready must report restored seq %d, got %#v", second.Seq, ready)
+	}
+	for _, wantBody := range []string{"before restart", "still here"} {
+		var replay event
+		if err := conn.ReadJSON(&replay); err != nil {
+			t.Fatalf("read replayed event %q: %v", wantBody, err)
+		}
+		payload, ok := replay.Payload.(map[string]interface{})
+		if !ok || payload["body"] != wantBody {
+			t.Fatalf("replayed event must carry pre-restart payload %q, got %#v", wantBody, replay.Payload)
+		}
+	}
+}

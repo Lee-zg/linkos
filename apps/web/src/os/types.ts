@@ -8,7 +8,8 @@ export type AppId =
   | "code"
   | "tasks"
   | "plugins"
-  | "settings";
+  | "settings"
+  | "admin";
 
 export type AppDefinition = {
   id: AppId;

@@ -62,6 +62,7 @@ function isJobStatus(value: unknown): value is JobStatus {
 type Workspace = {
   connected: boolean;
   lastSeq: number;
+  lastEvent: SocketEvent | null;
   messages: Message[];
   sendMessage: (body: string) => void;
   jobStatus: JobStatus;
@@ -73,6 +74,7 @@ const WorkspaceContext = createContext<Workspace | null>(null);
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState(initialMessages);
   const [jobStatus, setJobStatus] = useState<JobStatus>("succeeded");
+  const [lastEvent, setLastEvent] = useState<SocketEvent | null>(null);
   const jobTimers = useRef<number[]>([]);
   const localMessageIds = useRef(new Set<string>());
   const messageCounter = useRef(0);
@@ -85,6 +87,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const onSocketEvent = useCallback((event: SocketEvent) => {
+    setLastEvent(event);
     if (event.type === "chat.message.created") {
       const payload = event.payload as {
         body?: string;
@@ -177,8 +180,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ connected, lastSeq, messages, sendMessage, jobStatus, runTask }),
-    [connected, lastSeq, messages, sendMessage, jobStatus, runTask],
+    () => ({
+      connected,
+      lastSeq,
+      lastEvent,
+      messages,
+      sendMessage,
+      jobStatus,
+      runTask,
+    }),
+    [connected, lastSeq, lastEvent, messages, sendMessage, jobStatus, runTask],
   );
   return (
     <WorkspaceContext.Provider value={value}>

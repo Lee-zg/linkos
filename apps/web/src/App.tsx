@@ -1,10 +1,14 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { SessionProfile } from "@linkos/protocol";
 import { WindowManagerProvider } from "./os/window-manager";
 import { Desktop } from "./os/Desktop";
 import { WindowLayer } from "./os/Window";
 import { Dock } from "./os/Dock";
 import { ToastProvider, useToast } from "./os/Toaster";
 import { WorkspaceProvider, useWorkspace } from "./lib/workspace";
+import { SessionContext } from "./lib/session";
+import { dropSession } from "./lib/api";
+import { AccessGate } from "./gate/AccessGate";
 
 function Shell() {
   const { connected } = useWorkspace();
@@ -24,14 +28,37 @@ function Shell() {
   );
 }
 
-function App() {
+function Workbench({
+  profile,
+  onExit,
+}: {
+  profile: SessionProfile;
+  onExit: () => void;
+}) {
   return (
-    <ToastProvider>
+    <SessionContext.Provider value={{ profile, exit: onExit }}>
       <WorkspaceProvider>
         <WindowManagerProvider>
           <Shell />
         </WindowManagerProvider>
       </WorkspaceProvider>
+    </SessionContext.Provider>
+  );
+}
+
+function App() {
+  const [profile, setProfile] = useState<SessionProfile | null>(null);
+  const exit = useCallback(() => {
+    dropSession();
+    setProfile(null);
+  }, []);
+  return (
+    <ToastProvider>
+      {profile ? (
+        <Workbench profile={profile} onExit={exit} />
+      ) : (
+        <AccessGate onEnter={setProfile} />
+      )}
     </ToastProvider>
   );
 }

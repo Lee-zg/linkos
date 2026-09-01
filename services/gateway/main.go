@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,20 +34,41 @@ type eventStore interface {
 	CurrentSeq() int64
 }
 
+const eventRetention = 1000
+
 // memoryEventStore is a bounded append-only history. The hub mutex is the
-// synchronization boundary for this implementation; a persistent store must
-// preserve the same append and replay semantics.
+// synchronization boundary for this implementation; with a durable
+// persistBackend the retention window and seq survive restarts so reconnect
+// replay keeps working across gateway restarts.
 type memoryEventStore struct {
 	capacity int
+	backend  persistBackend
 	events   []event
 	seq      int64
 }
 
 func newMemoryEventStore(capacity int) *memoryEventStore {
+	return newMemoryEventStoreWithBackend(capacity, memoryBackend{})
+}
+
+func newMemoryEventStoreWithBackend(capacity int, backend persistBackend) *memoryEventStore {
 	if capacity < 1 {
 		capacity = 1
 	}
-	return &memoryEventStore{capacity: capacity}
+	s := &memoryEventStore{capacity: capacity, backend: backend}
+	stored, err := backend.loadEvents()
+	if err != nil {
+		log.Printf("load events: %v", err)
+		return s
+	}
+	if len(stored) > capacity {
+		stored = stored[len(stored)-capacity:]
+	}
+	s.events = stored
+	if len(stored) > 0 {
+		s.seq = stored[len(stored)-1].Seq
+	}
+	return s
 }
 
 func (s *memoryEventStore) Append(kind string, payload interface{}) event {
@@ -62,6 +86,9 @@ func (s *memoryEventStore) Append(kind string, payload interface{}) event {
 	s.events = append(s.events, e)
 	if len(s.events) > s.capacity {
 		s.events = s.events[len(s.events)-s.capacity:]
+	}
+	if err := s.backend.appendEvent(e); err != nil {
+		log.Printf("persist event seq %d: %v", e.Seq, err)
 	}
 	return e
 }
@@ -98,12 +125,12 @@ type hub struct {
 }
 
 func newHub() *hub {
-	return &hub{store: newMemoryEventStore(1000), clients: make(map[*websocket.Conn]chan []byte)}
+	return &hub{store: newMemoryEventStore(eventRetention), clients: make(map[*websocket.Conn]chan []byte)}
 }
 
 func newHubWithStore(store eventStore) *hub {
 	if store == nil {
-		store = newMemoryEventStore(1000)
+		store = newMemoryEventStore(eventRetention)
 	}
 	return &hub{store: store, clients: make(map[*websocket.Conn]chan []byte)}
 }
@@ -188,9 +215,17 @@ func systemEventID(kind string, seq int64) string {
 }
 
 func main() {
-	h := newHub()
-	uploads := newUploadStore(defaultUploadRoot())
-	auth := newAuthStore("demo")
+	if len(os.Args) > 1 {
+		runMaintenanceCommand(os.Args[1:])
+		return
+	}
+	backend := openBackend()
+	defer backend.Close()
+	h := newHubWithStore(newMemoryEventStoreWithBackend(eventRetention, backend))
+	uploads := newUploadStoreWithBackend(defaultUploadRoot(), backend)
+	auth := newAuthStore("demo", adminPasscode(), newAccessPolicyWithBackend(backend), newAccessStoreWithBackend(backend))
+	audit := newAuditStoreWithBackend(backend)
+	sessionLimiter := newRateLimiter(12, 0.5)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"status": "ok", "service": "gateway", "time": time.Now().UTC()})
@@ -198,32 +233,14 @@ func main() {
 	mux.HandleFunc("/api/v1/discovery", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"workspaces": []interface{}{map[string]interface{}{"id": "demo", "name": "Nimbus Lab", "address": "http://127.0.0.1:8787", "onlineMembers": 12, "tls": false}}})
 	})
-	mux.HandleFunc("/api/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
-			return
-		}
-		var body struct {
-			WorkspaceID string `json:"workspaceId"`
-			DisplayName string `json:"displayName"`
-		}
-		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&body)
-		}
-		principal, ok := auth.issue(body.WorkspaceID, body.DisplayName)
-		if !ok {
-			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create workspace session")
-			return
-		}
-		writeJSON(w, 201, map[string]interface{}{"accessToken": principal.Token, "expiresIn": int(sessionTTL.Seconds()), "workspaceId": principal.WorkspaceID, "userId": principal.UserID, "displayName": principal.DisplayName, "role": principal.Role})
-	})
-	mux.HandleFunc("/api/v1/workspaces/demo/snapshot", requireWorkspace(auth, "demo", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, snapshot()) }))
-	mux.HandleFunc("/api/v1/resources", requireWorkspace(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
+	registerAccessRoutes(mux, auth, h, audit, sessionLimiter)
+	mux.HandleFunc("/api/v1/workspaces/demo/snapshot", requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, snapshot()) }))
+	mux.HandleFunc("/api/v1/resources", requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"items": []interface{}{map[string]string{"id": "file_release", "type": "file", "name": "release-candidate.tar.gz"}, map[string]string{"id": "project_gateway", "type": "code.project", "name": "api-gateway"}}, "nextCursor": ""})
 	}))
-	mux.HandleFunc("/api/v1/uploads", requireWorkspace(auth, "demo", uploads.handleCollection))
-	mux.HandleFunc("/api/v1/uploads/", requireWorkspace(auth, "demo", uploads.handleItem))
-	mux.HandleFunc("/api/v1/messages", requireWorkspace(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/uploads", requireActive(auth, "demo", uploads.handleCollection))
+	mux.HandleFunc("/api/v1/uploads/", requireActive(auth, "demo", uploads.handleItem))
+	mux.HandleFunc("/api/v1/messages", requireActive(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
 			return
@@ -240,7 +257,7 @@ func main() {
 		h.emit("chat.message.created", map[string]string{"body": body.Body, "author": "你", "channelId": body.ChannelID, "clientMsgId": body.ClientMsgID})
 		writeJSON(w, 201, map[string]string{"messageId": "msg_local", "status": "accepted"})
 	}))
-	mux.HandleFunc("/api/v1/jobs", requireWorkspace(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/jobs", requireActive(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
 			return
@@ -251,16 +268,51 @@ func main() {
 		writeJSON(w, 202, map[string]interface{}{"id": id, "status": "queued", "runnerId": "runner-02"})
 		go simulateJob(h, id, spec)
 	}))
-	mux.HandleFunc("/api/v1/plugins", requireWorkspace(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/plugins", requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"items": []interface{}{plugin("files.core", "文件", "0.1.0"), plugin("chat.core", "聊天", "0.1.0"), plugin("code.workbench", "代码工作台", "0.1.0"), plugin("runner.exec", "运行任务", "0.1.0")}})
 	}))
-	mux.HandleFunc("/api/v1/ws", requireWorkspace(auth, "demo", h.handleWS))
+	mux.HandleFunc("/api/v1/ws", requireActive(auth, "demo", h.handleWS))
 	server := &http.Server{Addr: ":8787", Handler: cors(mux), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("LinkOS Gateway listening on %s", server.Addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
+
+// runMaintenanceCommand implements the offline backup/restore operations.
+// Both require LINKOS_DATA_DIR and run while the gateway is stopped, so the
+// snapshot or restored image is authoritative when the server starts again.
+func runMaintenanceCommand(args []string) {
+	dir := strings.TrimSpace(os.Getenv("LINKOS_DATA_DIR"))
+	if dir == "" {
+		log.Fatal("LINKOS_DATA_DIR must be set for backup/restore")
+	}
+	switch args[0] {
+	case "backup":
+		backend := openBackend()
+		defer backend.Close()
+		manifest, err := backend.backupTo(filepath.Join(dir, "backups"))
+		if err != nil {
+			log.Fatalf("backup: %v", err)
+		}
+		raw, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			log.Fatalf("backup: %v", err)
+		}
+		fmt.Println(string(raw))
+	case "restore":
+		if len(args) != 2 {
+			log.Fatal("usage: gateway restore <backup-file>")
+		}
+		if err := restoreBackup(dir, args[1]); err != nil {
+			log.Fatalf("restore: %v", err)
+		}
+		log.Printf("restored %s to %s", args[1], filepath.Join(dir, "gateway.db"))
+	default:
+		log.Fatalf("unknown command %q (expected backup or restore <file>)", args[0])
+	}
+}
+
 func simulateJob(h *hub, id string, spec map[string]interface{}) {
 	command, _ := spec["command"].(string)
 	if command == "" {

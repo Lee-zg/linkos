@@ -7,11 +7,31 @@ import (
 	"time"
 )
 
-func TestAuthStoreIssuesAndValidatesWorkspaceSession(t *testing.T) {
-	auth := newAuthStore("demo")
-	principal, ok := auth.issue("demo", "测试设备")
-	if !ok || principal.Token == "" || principal.WorkspaceID != "demo" {
+func newTestAuth() *authStore {
+	return newAuthStore("demo", "test-passcode", newAccessPolicy(), newAccessStore())
+}
+
+func issueLogin(t *testing.T, auth *authStore, name string) authPrincipal {
+	t.Helper()
+	principal, _, errCode := auth.issueSession(sessionRequest{
+		WorkspaceID: "demo",
+		DisplayName: name,
+		AccessType:  "login",
+	})
+	if errCode != "" {
+		t.Fatalf("issue login session failed: %s", errCode)
+	}
+	return principal
+}
+
+func TestLoginSessionIssuesAndValidatesWorkspaceSession(t *testing.T) {
+	auth := newTestAuth()
+	principal := issueLogin(t, auth, "测试设备")
+	if principal.Token == "" || principal.WorkspaceID != "demo" {
 		t.Fatalf("unexpected principal: %#v", principal)
+	}
+	if principal.Role != "member" || principal.AccessType != "login" || principal.Status != "active" {
+		t.Fatalf("unexpected principal fields: %#v", principal)
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/resources", nil)
@@ -31,14 +51,13 @@ func TestAuthStoreIssuesAndValidatesWorkspaceSession(t *testing.T) {
 }
 
 func TestAuthStoreRejectsExpiredSession(t *testing.T) {
-	auth := newAuthStore("demo")
-	principal, ok := auth.issue("demo", "过期设备")
-	if !ok {
-		t.Fatal("issue session failed")
-	}
+	auth := newTestAuth()
+	principal := issueLogin(t, auth, "过期设备")
+
 	auth.mu.Lock()
-	principal.ExpiresAt = time.Now().UTC().Add(-time.Minute)
-	auth.sessions[principal.Token] = principal
+	stored := auth.sessions[principal.Token]
+	stored.ExpiresAt = time.Now().UTC().Add(-time.Minute)
+	auth.sessions[principal.Token] = stored
 	auth.mu.Unlock()
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/resources", nil)
@@ -54,9 +73,9 @@ func TestAuthStoreRejectsExpiredSession(t *testing.T) {
 	}
 }
 
-func TestRequireWorkspaceReturnsUnauthorizedWithoutSession(t *testing.T) {
-	auth := newAuthStore("demo")
-	handler := requireWorkspace(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
+func TestRequireActiveReturnsUnauthorizedWithoutSession(t *testing.T) {
+	auth := newTestAuth()
+	handler := requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
@@ -66,10 +85,7 @@ func TestRequireWorkspaceReturnsUnauthorizedWithoutSession(t *testing.T) {
 		t.Fatalf("expected 401, got %d", unauthorized.Code)
 	}
 
-	principal, ok := auth.issue("demo", "有效设备")
-	if !ok {
-		t.Fatal("issue session failed")
-	}
+	principal := issueLogin(t, auth, "有效设备")
 	authorizedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/resources", nil)
 	authorizedRequest.Header.Set("Authorization", "Bearer "+principal.Token)
 	authorized := httptest.NewRecorder()

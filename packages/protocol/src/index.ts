@@ -29,6 +29,10 @@ export interface DomainEvent<T = unknown> {
 export type ErrorCode =
   | "AUTH_REQUIRED"
   | "FORBIDDEN"
+  | "ACCESS_DENIED"
+  | "ACCESS_PENDING"
+  | "ACCESS_REJECTED"
+  | "ACCESS_REVOKED"
   | "RESOURCE_VERSION_MISMATCH"
   | "UPLOAD_PART_INVALID"
   | "QUOTA_EXCEEDED"
@@ -46,6 +50,54 @@ export interface ApiErrorBody {
   traceId?: string;
 }
 
+export type AccessType = "login" | "anonymous" | "guest";
+
+export type AccessStatus = "pending" | "active" | "rejected" | "revoked";
+
+export interface AccessPolicy {
+  allowAnonymousApplication: boolean;
+  allowFullAnonymous: boolean;
+}
+
+export interface AccessRecord {
+  id: string;
+  userId: string;
+  displayName: string;
+  accessType: AccessType;
+  status: AccessStatus;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  note?: string;
+  remoteAddr?: string;
+}
+
+export type AuditAction =
+  | "session.issue"
+  | "session.denied"
+  | "access.policy.update"
+  | "access.record.approve"
+  | "access.record.reject";
+
+export interface AuditEntry {
+  id: string;
+  at: string;
+  actorUserId?: string;
+  actorName?: string;
+  action: AuditAction | string;
+  target?: string;
+  detail?: string;
+  remoteAddr?: string;
+}
+
+export interface SessionCreateInput {
+  workspaceId?: string;
+  displayName?: string;
+  accessType: AccessType;
+  passcode?: string;
+  note?: string;
+}
+
 export interface SessionToken {
   accessToken: string;
   expiresIn: number;
@@ -53,6 +105,17 @@ export interface SessionToken {
   userId: string;
   displayName: string;
   role: string;
+  accessType: AccessType;
+  status: AccessStatus;
+}
+
+export interface SessionProfile {
+  userId: string;
+  displayName: string;
+  role: string;
+  accessType: AccessType;
+  status: AccessStatus;
+  workspaceId: string;
 }
 
 export interface MessageCreateInput {
@@ -191,4 +254,8 @@ export const EVENT_TYPES = {
   chatMessageCreated: "chat.message.created",
   jobStatusChanged: "job.status.changed",
   jobLogChunk: "job.log.chunk",
+  accessRecordCreated: "access.record.created",
+  accessRecordApproved: "access.record.approved",
+  accessRecordRejected: "access.record.rejected",
+  accessPolicyUpdated: "access.policy.updated",
 } as const;

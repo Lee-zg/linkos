@@ -5,6 +5,7 @@ import {
   LayoutGrid,
   MessageSquare,
   Settings,
+  ShieldCheck,
   Terminal,
 } from "lucide-react";
 import type { AppDefinition, AppId } from "./types";
@@ -15,6 +16,7 @@ import { CodeApp } from "../apps/CodeApp";
 import { TasksApp } from "../apps/TasksApp";
 import { PluginsApp } from "../apps/PluginsApp";
 import { SettingsApp } from "../apps/SettingsApp";
+import { AdminApp } from "../apps/AdminApp";
 
 export const apps: AppDefinition[] = [
   {
@@ -80,6 +82,15 @@ export const apps: AppDefinition[] = [
     defaultSize: { w: 640, h: 520 },
     minSize: { w: 420, h: 360 },
   },
+  {
+    id: "admin",
+    name: "管理后台",
+    icon: ShieldCheck,
+    gradient: "linear-gradient(135deg, #f472b6, #db2777)",
+    component: AdminApp,
+    defaultSize: { w: 900, h: 620 },
+    minSize: { w: 560, h: 440 },
+  },
 ];
 
 const appIndex = new Map(apps.map((app) => [app.id, app]));
@@ -88,4 +99,8 @@ export function getApp(id: AppId): AppDefinition {
   const app = appIndex.get(id);
   if (!app) throw new Error(`Unknown app: ${id}`);
   return app;
+}
+
+export function visibleApps(role: string): AppDefinition[] {
+  return apps.filter((app) => app.id !== "admin" || role === "admin");
 }

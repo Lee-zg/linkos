@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,6 +41,7 @@ type uploadStore struct {
 	mu       sync.Mutex
 	root     string
 	sessions map[string]*uploadSession
+	backend  persistBackend
 }
 
 func defaultUploadRoot() string {
@@ -50,11 +52,55 @@ func defaultUploadRoot() string {
 }
 
 func newUploadStore(root string) *uploadStore {
+	return newUploadStoreWithBackend(root, memoryBackend{})
+}
+
+// newUploadStoreWithBackend restores persisted upload sessions so in-flight
+// uploads survive a gateway restart. A session interrupted mid-assembly
+// ("verifying") downgrades to "uploading": completion is idempotent, so the
+// client can safely re-submit the complete request.
+func newUploadStoreWithBackend(root string, backend persistBackend) *uploadStore {
 	if strings.TrimSpace(root) == "" {
 		root = defaultUploadRoot()
 	}
 	_ = os.MkdirAll(root, 0o755)
-	return &uploadStore{root: root, sessions: make(map[string]*uploadSession)}
+	store := &uploadStore{root: root, sessions: make(map[string]*uploadSession), backend: backend}
+	stored, err := backend.loadUploadSessions()
+	if err != nil {
+		log.Printf("load upload sessions: %v", err)
+		return store
+	}
+	for i := range stored {
+		session := stored[i]
+		if session.status == "verifying" {
+			session.status = "uploading"
+		}
+		if session.received == nil {
+			session.received = make(map[int]int64)
+		}
+		store.sessions[session.id] = &session
+	}
+	if len(stored) > 0 {
+		log.Printf("restored %d upload sessions", len(stored))
+	}
+	return store
+}
+
+// persistSession saves a snapshot outside the store mutex; failures are
+// logged and never block the upload path.
+func (s *uploadStore) persistSession(session uploadSession) {
+	if err := s.backend.saveUploadSession(session); err != nil {
+		log.Printf("persist upload %s: %v", session.id, err)
+	}
+}
+
+func cloneUploadSession(session *uploadSession) uploadSession {
+	clone := *session
+	clone.received = make(map[int]int64, len(session.received))
+	for partNo, size := range session.received {
+		clone.received[partNo] = size
+	}
+	return clone
 }
 
 func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +165,7 @@ func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.sessions[id] = session
 	s.mu.Unlock()
+	s.persistSession(cloneUploadSession(session))
 	writeJSON(w, http.StatusCreated, uploadView(session))
 }
 
@@ -237,7 +284,9 @@ func (s *uploadStore) handlePart(w http.ResponseWriter, r *http.Request, id stri
 	session.received[partNo] = written
 	session.status = "uploading"
 	view := uploadView(session)
+	snapshot := cloneUploadSession(session)
 	s.mu.Unlock()
+	s.persistSession(snapshot)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"uploadId":      id,
 		"partNo":        partNo,
@@ -352,7 +401,9 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 		current.completedPath = completedPath
 	}
 	view := uploadView(s.sessions[id])
+	snapshot := cloneUploadSession(s.sessions[id])
 	s.mu.Unlock()
+	s.persistSession(snapshot)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"uploadId":    id,
 		"resourceId":  view.ResourceID,
@@ -363,10 +414,16 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 
 func (s *uploadStore) markFailed(id string) {
 	s.mu.Lock()
+	var snapshot *uploadSession
 	if session, ok := s.sessions[id]; ok {
 		session.status = "failed"
+		clone := cloneUploadSession(session)
+		snapshot = &clone
 	}
 	s.mu.Unlock()
+	if snapshot != nil {
+		s.persistSession(*snapshot)
+	}
 }
 
 func (s *uploadStore) get(id string) (*uploadSession, bool) {
@@ -376,12 +433,8 @@ func (s *uploadStore) get(id string) (*uploadSession, bool) {
 	if !ok {
 		return nil, false
 	}
-	copySession := *session
-	copySession.received = make(map[int]int64, len(session.received))
-	for partNo, size := range session.received {
-		copySession.received[partNo] = size
-	}
-	return &copySession, true
+	clone := cloneUploadSession(session)
+	return &clone, true
 }
 
 type uploadViewModel struct {

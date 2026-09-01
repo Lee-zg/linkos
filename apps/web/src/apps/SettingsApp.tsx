@@ -1,6 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { AccessPolicy } from "@linkos/protocol";
 import { useWorkspace } from "../lib/workspace";
 import { useToast } from "../os/Toaster";
+import { fetchPolicy } from "../lib/api";
+import { useSession } from "../lib/session";
+import { useWindowManager } from "../os/window-manager";
 
 function Row({
   label,
@@ -53,8 +57,27 @@ function Toggle({
 export function SettingsApp() {
   const { connected } = useWorkspace();
   const toast = useToast();
+  const { profile } = useSession();
+  const { open } = useWindowManager();
   const [notifications, setNotifications] = useState(true);
   const [autoStart, setAutoStart] = useState(false);
+  const [policy, setPolicy] = useState<AccessPolicy | null>(null);
+
+  useEffect(() => {
+    fetchPolicy().then(setPolicy).catch(() => setPolicy(null));
+  }, []);
+
+  const policySummary = policy
+    ? [
+        "登录访问",
+        policy.allowFullAnonymous
+          ? "完全匿名已开启"
+          : policy.allowAnonymousApplication
+            ? "匿名申请已开启"
+            : "匿名访问关闭",
+      ].join(" · ")
+    : "访问策略不可用（网关离线）";
+
   return (
     <div className="flex flex-col gap-4 p-4">
       <section className="rounded-lg border bg-card px-4 py-2">
@@ -100,6 +123,29 @@ export function SettingsApp() {
                 onChange={() => setAutoStart((v) => !v)}
                 label="随系统启动"
               />
+            }
+          />
+        </div>
+      </section>
+      <section className="rounded-lg border bg-card px-4 py-2">
+        <h3 className="m-0 pt-2 text-sm font-semibold">访问控制</h3>
+        <div className="divide-y">
+          <Row
+            label="当前访问模式"
+            desc={policySummary}
+            control={
+              profile.role === "admin" ? (
+                <button
+                  className="shrink-0 cursor-pointer rounded-lg border bg-transparent px-3 py-1.5 text-xs hover:bg-accent"
+                  onClick={() => open("admin")}
+                >
+                  打开管理后台
+                </button>
+              ) : (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  由管理员配置
+                </span>
+              )
             }
           />
         </div>

@@ -15,7 +15,7 @@ Gateway :8787  ----  Runner :9797 (安全协议 stub)
        +-- job state simulation
 ```
 
-当前 Gateway 仍为开发模式：使用内存事件历史、内存短期会话、demo 资源和本地临时目录上传，不持久化用户/权限/业务元数据。已完成事件序号、1,000 条有界历史、`last_event_seq` 补发和超窗口快照提示的 PoC；已完成上传会话、分片 SHA-256 校验、乱序/断点恢复和完整文件校验的 PoC；已接入开发态随机 Bearer 会话和工作区路由统一鉴权。下一步接入 SQLite 元数据、设备身份/RBAC、内容寻址文件存储、Range 下载和事件快照恢复；Runner 在 Linux 上使用 rootless container/WASI 进行隔离执行。
+当前 Gateway 仍为开发模式：使用内存短期会话、demo 资源和本地上传目录。访问策略、审批记录、审计日志、WS 事件与上传会话元数据已通过 `persistBackend` 存储接口落地 SQLite 后端：设置 `LINKOS_DATA_DIR` 后持久化到 `<dir>/gateway.db`（版本化迁移、重启恢复、跨重启 `last_event_seq` 重放、上传会话跨重启续传，上传数据目录由 `LINKOS_UPLOAD_DIR` 固定以便恢复），未设置时保持内存默认；鉴权会话按设计为易失态。离线运维命令 `gateway backup` 用 `VACUUM INTO` 在 `<dir>/backups` 生成一致性快照（清单含大小/SHA-256/schema 版本），`gateway restore <file>` 校验完整性与 schema 后原子替换数据库。已完成事件序号、1,000 条有界历史、`last_event_seq` 补发和超窗口快照提示的 PoC；已完成上传会话、分片 SHA-256 校验、乱序/断点恢复和完整文件校验的 PoC；已接入开发态随机 Bearer 会话和工作区路由统一鉴权。下一步接入设备身份/RBAC、内容寻址文件存储、Range 下载和事件快照恢复；Runner 在 Linux 上使用 rootless container/WASI 进行隔离执行。
 
 上传 PoC 路径：
 

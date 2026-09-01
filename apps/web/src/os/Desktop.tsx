@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { apps } from "./apps";
+import { visibleApps } from "./apps";
 import { AppIcon } from "./AppIcon";
 import { useWindowManager } from "./window-manager";
+import { useSession } from "../lib/session";
 
 export function Desktop() {
   const { open } = useWindowManager();
+  const { profile } = useSession();
   const [selected, setSelected] = useState<string | null>(null);
   return (
     <div
@@ -12,7 +14,7 @@ export function Desktop() {
       onPointerDown={() => setSelected(null)}
     >
       <div className="desktop-icons relative z-[1] p-3">
-        {apps.map((app) => (
+        {visibleApps(profile.role).map((app) => (
           <button
             key={app.id}
             className={`flex w-[92px] cursor-pointer flex-col items-center gap-1.5 rounded-lg border-none bg-transparent px-1 py-2 select-none ${

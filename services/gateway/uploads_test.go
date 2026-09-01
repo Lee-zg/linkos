@@ -135,3 +135,82 @@ func itoa(value int) string {
 func stringsRepeat(value string, count int) string {
 	return string(bytes.Repeat([]byte(value), count))
 }
+
+func TestUploadResumeAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	path := testSQLitePath(t)
+	backend, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatalf("open backend: %v", err)
+	}
+	store := newUploadStoreWithBackend(root, backend)
+	content := []byte("0123456789abcdef")
+	fullHash := sha256.Sum256(content)
+
+	createResponse := httptest.NewRecorder()
+	store.handleCollection(createResponse, httptest.NewRequest(http.MethodPost, "/api/v1/uploads",
+		bytes.NewBufferString(`{"name":"artifact.bin","size":16,"chunkSize":5}`)))
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("create upload: status=%d body=%s", createResponse.Code, createResponse.Body.String())
+	}
+	var session uploadViewModel
+	if err := json.Unmarshal(createResponse.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	uploadPart(t, store, session.ID, 0, content[:5])
+	if err := backend.Close(); err != nil {
+		t.Fatalf("close backend: %v", err)
+	}
+
+	reopened, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatalf("reopen backend: %v", err)
+	}
+	defer reopened.Close()
+	restored := newUploadStoreWithBackend(root, reopened)
+
+	state := getUpload(t, restored, session.ID)
+	if state.Status != "uploading" || !reflect.DeepEqual(state.ReceivedParts, []int{0}) {
+		t.Fatalf("upload session must resume after restart, got %#v", state)
+	}
+	for _, partNo := range []int{1, 2, 3} {
+		uploadPart(t, restored, session.ID, partNo, content[partNo*5:min((partNo+1)*5, len(content))])
+	}
+	completeResponse := httptest.NewRecorder()
+	restored.handleItem(completeResponse, httptest.NewRequest(http.MethodPost, "/api/v1/uploads/"+session.ID+"/complete",
+		bytes.NewBufferString(`{"contentHash":"`+hex.EncodeToString(fullHash[:])+`"}`)))
+	if completeResponse.Code != http.StatusCreated {
+		t.Fatalf("complete resumed upload: status=%d body=%s", completeResponse.Code, completeResponse.Body.String())
+	}
+	completed, err := os.ReadFile(filepath.Join(restored.root, session.ID, "complete"))
+	if err != nil {
+		t.Fatalf("read completed upload: %v", err)
+	}
+	if !bytes.Equal(completed, content) {
+		t.Fatalf("completed content mismatch: %q", completed)
+	}
+}
+
+func TestUploadRestoreDowngradesVerifying(t *testing.T) {
+	root := t.TempDir()
+	backend := newTestSQLiteBackend(t, "")
+	session := uploadSession{
+		id:         "up_verifying",
+		name:       "artifact.bin",
+		size:       4,
+		mimeType:   "application/octet-stream",
+		chunkSize:  2,
+		totalParts: 2,
+		received:   map[int]int64{0: 2, 1: 2},
+		status:     "verifying",
+		directory:  filepath.Join(root, "up_verifying"),
+	}
+	if err := backend.saveUploadSession(session); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	store := newUploadStoreWithBackend(root, backend)
+	state := getUpload(t, store, session.id)
+	if state.Status != "uploading" {
+		t.Fatalf("sessions interrupted mid-verification must resume as uploading, got %s", state.Status)
+	}
+}
