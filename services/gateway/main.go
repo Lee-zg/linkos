@@ -32,6 +32,7 @@ type eventStore interface {
 	Append(kind string, payload interface{}) event
 	Since(afterSeq int64) (events []event, complete bool)
 	CurrentSeq() int64
+	Retained() []event
 }
 
 const eventRetention = 1000
@@ -118,29 +119,93 @@ func (s *memoryEventStore) Since(afterSeq int64) ([]event, bool) {
 
 func (s *memoryEventStore) CurrentSeq() int64 { return s.seq }
 
+// Retained returns a copy of the events currently inside the retention window,
+// oldest first. The hub uses it to rebuild derived indexes (such as the
+// clientMsgId dedup map) after a restart from the persisted window.
+func (s *memoryEventStore) Retained() []event {
+	out := make([]event, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
+// messageDedupRetention bounds the clientMsgId idempotency index so a
+// long-lived gateway does not grow it without limit. It matches the event
+// retention window: once a message has scrolled out of replay history, its
+// clientMsgId no longer needs dedup protection.
+const messageDedupRetention = 1000
+
 type hub struct {
-	mu      sync.Mutex
-	store   eventStore
-	clients map[*websocket.Conn]chan []byte
+	mu        sync.Mutex
+	store     eventStore
+	clients   map[*websocket.Conn]chan []byte
+	seen      map[string]event
+	seenOrder []string
 }
 
 func newHub() *hub {
-	return &hub{store: newMemoryEventStore(eventRetention), clients: make(map[*websocket.Conn]chan []byte)}
+	return &hub{
+		store:   newMemoryEventStore(eventRetention),
+		clients: make(map[*websocket.Conn]chan []byte),
+		seen:    make(map[string]event),
+	}
 }
 
 func newHubWithStore(store eventStore) *hub {
 	if store == nil {
 		store = newMemoryEventStore(eventRetention)
 	}
-	return &hub{store: store, clients: make(map[*websocket.Conn]chan []byte)}
+	h := &hub{
+		store:   store,
+		clients: make(map[*websocket.Conn]chan []byte),
+		seen:    make(map[string]event),
+	}
+	h.seedDedupFromRetained()
+	return h
+}
+
+// seedDedupFromRetained rebuilds the clientMsgId idempotency index from the
+// events already inside the store's retention window (for example reloaded from
+// SQLite after a restart), so write idempotency survives a gateway restart for
+// every message that is still replayable. It runs at construction, before the
+// hub is shared with any goroutine, so it takes no lock.
+func (h *hub) seedDedupFromRetained() {
+	for _, e := range h.store.Retained() {
+		if e.Type != "chat.message.created" {
+			continue
+		}
+		if id := clientMsgIDFromPayload(e.Payload); id != "" {
+			h.recordSeenLocked(id, e)
+		}
+	}
+}
+
+// clientMsgIDFromPayload extracts the clientMsgId from a chat event payload,
+// handling both the in-process map[string]string form and the
+// map[string]interface{} form produced by JSON-decoding a persisted event.
+func clientMsgIDFromPayload(payload interface{}) string {
+	switch p := payload.(type) {
+	case map[string]string:
+		return p["clientMsgId"]
+	case map[string]interface{}:
+		if id, ok := p["clientMsgId"].(string); ok {
+			return id
+		}
+	}
+	return ""
 }
 
 func (h *hub) emit(kind string, payload interface{}) event {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.emitLocked(kind, payload)
+}
+
+// emitLocked appends an event and broadcasts it to every connected client. It
+// assumes h.mu is already held.
+func (h *hub) emitLocked(kind string, payload interface{}) event {
 	e := h.store.Append(kind, payload)
 	b, err := json.Marshal(e)
 	if err != nil {
-		h.mu.Unlock()
 		return e
 	}
 	for _, queue := range h.clients {
@@ -150,8 +215,47 @@ func (h *hub) emit(kind string, payload interface{}) event {
 			log.Printf("dropping event for slow client: %s", kind)
 		}
 	}
-	h.mu.Unlock()
 	return e
+}
+
+// publishMessage emits a chat.message.created event with idempotency keyed on
+// the client-supplied clientMsgId. A retry carrying an already-seen non-empty
+// clientMsgId returns the original event and duplicate=true without appending a
+// second event or re-broadcasting, satisfying the "重复 eventId 幂等" contract.
+// An empty clientMsgId is never deduplicated. It assumes nothing about locking:
+// the hub mutex is taken here.
+func (h *hub) publishMessage(body, channelID, clientMsgID string) (event, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if clientMsgID != "" {
+		if prev, ok := h.seen[clientMsgID]; ok {
+			return prev, true
+		}
+	}
+	e := h.emitLocked("chat.message.created", map[string]string{
+		"body":        body,
+		"author":      "你",
+		"channelId":   channelID,
+		"clientMsgId": clientMsgID,
+	})
+	if clientMsgID != "" {
+		h.recordSeenLocked(clientMsgID, e)
+	}
+	return e, false
+}
+
+// recordSeenLocked adds clientMsgID to the bounded FIFO dedup index, evicting
+// the oldest entries past messageDedupRetention. It assumes h.mu is held.
+func (h *hub) recordSeenLocked(clientMsgID string, e event) {
+	if _, exists := h.seen[clientMsgID]; !exists {
+		h.seenOrder = append(h.seenOrder, clientMsgID)
+	}
+	h.seen[clientMsgID] = e
+	for len(h.seenOrder) > messageDedupRetention {
+		oldest := h.seenOrder[0]
+		h.seenOrder = h.seenOrder[1:]
+		delete(h.seen, oldest)
+	}
 }
 func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.URL.Query().Get("workspace")
@@ -255,8 +359,19 @@ func main() {
 			writeJSON(w, 400, map[string]string{"error": "invalid_message"})
 			return
 		}
-		h.emit("chat.message.created", map[string]string{"body": body.Body, "author": "你", "channelId": body.ChannelID, "clientMsgId": body.ClientMsgID})
-		writeJSON(w, 201, map[string]string{"messageId": "msg_local", "status": "accepted"})
+		e, duplicate := h.publishMessage(body.Body, body.ChannelID, body.ClientMsgID)
+		status := http.StatusCreated
+		state := "accepted"
+		if duplicate {
+			status = http.StatusOK
+			state = "duplicate"
+		}
+		writeJSON(w, status, map[string]interface{}{
+			"messageId":   e.EventID,
+			"serverMsgId": e.EventID,
+			"seq":         e.Seq,
+			"status":      state,
+		})
 	}))
 	mux.HandleFunc("/api/v1/jobs", requireActive(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {

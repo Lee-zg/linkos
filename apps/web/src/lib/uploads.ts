@@ -1,6 +1,7 @@
 import type { UploadCompleteResult, UploadSession } from "@linkos/protocol";
 import { sha256 } from "js-sha256";
 import { ApiError, getSessionToken } from "./api";
+import { evictCachedHash, getCachedHash, setCachedHash } from "./hashCache";
 
 const DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024;
 const CONCURRENCY = 4;
@@ -115,10 +116,16 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 /**
  * Uploads a file through the chunked protocol with 4-way concurrency and
- * resume support. The full-file SHA-256 is computed by streaming the file
- * through an incremental hasher, and each part is re-read from the file on
- * demand, so memory usage stays bounded by the chunk size regardless of the
- * file size (risk R-04).
+ * resume support. The full-file SHA-256 is reused from a (name, size,
+ * lastModified) cache when present, so resuming a large file starts in about a
+ * second instead of paying the full re-hash cost (risk R-06); on a cache miss
+ * it is computed by streaming the file through an incremental hasher and then
+ * cached. Each part is re-read from the file on demand, so memory usage stays
+ * bounded by the chunk size regardless of the file size (risk R-04).
+ *
+ * A cached hash can be stale if the content changed without bumping
+ * `lastModified`; the server rejects the mismatched hash at completion, so we
+ * evict the entry, recompute from the real bytes, and retry once.
  */
 export async function uploadFile(
   file: File,
@@ -134,8 +141,47 @@ export async function uploadFile(
       sentBytes: 0,
       totalBytes: file.size,
     });
-  reportHashing(0);
-  const contentHash = await streamFileHash(file, chunkSize, reportHashing);
+
+  const cached = getCachedHash(localStorage, file);
+  let contentHash: string;
+  let fromCache: boolean;
+  if (cached !== null) {
+    contentHash = cached;
+    fromCache = true;
+    reportHashing(file.size);
+  } else {
+    fromCache = false;
+    reportHashing(0);
+    contentHash = await streamFileHash(file, chunkSize, reportHashing);
+    setCachedHash(localStorage, file, contentHash);
+  }
+
+  try {
+    return await runUpload(file, contentHash, onProgress, chunkSize);
+  } catch (error) {
+    if (!fromCache || !isHashMismatch(error)) throw error;
+    evictCachedHash(localStorage, file);
+    reportHashing(0);
+    contentHash = await streamFileHash(file, chunkSize, reportHashing);
+    setCachedHash(localStorage, file, contentHash);
+    return await runUpload(file, contentHash, onProgress, chunkSize);
+  }
+}
+
+function isHashMismatch(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 422 &&
+    error.code === "UPLOAD_PART_INVALID"
+  );
+}
+
+async function runUpload(
+  file: File,
+  contentHash: string,
+  onProgress: (progress: UploadProgress) => void,
+  chunkSize: number,
+): Promise<UploadedFileRecord> {
   const totalParts = Math.max(1, Math.ceil(file.size / chunkSize));
 
   const index = loadSessionIndex();
