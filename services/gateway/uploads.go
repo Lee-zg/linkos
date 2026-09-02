@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,13 +15,21 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	defaultUploadChunkSize int64 = 8 * 1024 * 1024
 	maxUploadChunkSize     int64 = 64 * 1024 * 1024
+
+	defaultMaxUploadFileSize int64 = 10 * 1024 * 1024 * 1024
+	defaultMaxActiveUploads  int   = 64
 )
+
+// uploadIDSequence disambiguates session ids created within the same clock
+// tick; time.Now().UnixNano() alone collides on coarse-resolution clocks.
+var uploadIDSequence uint64
 
 type uploadSession struct {
 	id            string
@@ -38,10 +47,13 @@ type uploadSession struct {
 }
 
 type uploadStore struct {
-	mu       sync.Mutex
-	root     string
-	sessions map[string]*uploadSession
-	backend  persistBackend
+	mu               sync.Mutex
+	root             string
+	sessions         map[string]*uploadSession
+	backend          persistBackend
+	content          *contentStore
+	maxFileSize      int64
+	maxActiveUploads int
 }
 
 func defaultUploadRoot() string {
@@ -49,6 +61,32 @@ func defaultUploadRoot() string {
 		return root
 	}
 	return filepath.Join(os.TempDir(), "linkos-uploads")
+}
+
+func envInt64Limit(key string, fallback int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		log.Printf("invalid %s=%q, falling back to %d", key, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+func envIntLimit(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		log.Printf("invalid %s=%q, falling back to %d", key, raw, fallback)
+		return fallback
+	}
+	return value
 }
 
 func newUploadStore(root string) *uploadStore {
@@ -64,7 +102,14 @@ func newUploadStoreWithBackend(root string, backend persistBackend) *uploadStore
 		root = defaultUploadRoot()
 	}
 	_ = os.MkdirAll(root, 0o755)
-	store := &uploadStore{root: root, sessions: make(map[string]*uploadSession), backend: backend}
+	store := &uploadStore{
+		root:             root,
+		sessions:         make(map[string]*uploadSession),
+		backend:          backend,
+		content:          newContentStoreWithQuota(filepath.Join(root, "objects"), envInt64Limit("LINKOS_CAS_MAX_DISK_BYTES", 0)),
+		maxFileSize:      envInt64Limit("LINKOS_UPLOAD_MAX_FILE_SIZE", defaultMaxUploadFileSize),
+		maxActiveUploads: envIntLimit("LINKOS_UPLOAD_MAX_ACTIVE_UPLOADS", defaultMaxActiveUploads),
+	}
 	stored, err := backend.loadUploadSessions()
 	if err != nil {
 		log.Printf("load upload sessions: %v", err)
@@ -124,6 +169,14 @@ func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "name and size are invalid")
 		return
 	}
+	if s.maxFileSize > 0 && input.Size > s.maxFileSize {
+		writeAPIError(w, http.StatusRequestEntityTooLarge, "UPLOAD_TOO_LARGE", "file exceeds the upload size limit")
+		return
+	}
+	if s.activeSessionCount() >= s.maxActiveUploads {
+		writeAPIError(w, http.StatusTooManyRequests, "TOO_MANY_ACTIVE_UPLOADS", "too many uploads in progress, try again later")
+		return
+	}
 	chunkSize := input.ChunkSize
 	if chunkSize == 0 {
 		chunkSize = defaultUploadChunkSize
@@ -141,7 +194,7 @@ func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
 	if totalParts == 0 {
 		totalParts = 1
 	}
-	id := fmt.Sprintf("up_%d", time.Now().UnixNano())
+	id := fmt.Sprintf("up_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&uploadIDSequence, 1))
 	directory := filepath.Join(s.root, id)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create upload directory")
@@ -341,10 +394,8 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 	session.status = "verifying"
 	directory := session.directory
 	totalParts := session.totalParts
-	resourceID := "file_" + id
 	s.mu.Unlock()
 
-	completedPath := filepath.Join(directory, "complete")
 	temporary, err := os.CreateTemp(directory, ".complete-*")
 	if err != nil {
 		s.markFailed(id)
@@ -387,9 +438,14 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusUnprocessableEntity, "UPLOAD_PART_INVALID", "full upload hash does not match")
 		return
 	}
-	if err := os.Rename(temporaryName, completedPath); err != nil {
+	objectPath, err := s.content.commit(temporaryName, actualHash)
+	if err != nil {
 		_ = os.Remove(temporaryName)
 		s.markFailed(id)
+		if errors.Is(err, errCASQuotaExceeded) {
+			writeAPIError(w, http.StatusInsufficientStorage, "INSUFFICIENT_STORAGE", "object exceeds the content store disk quota")
+			return
+		}
 		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not commit completed upload")
 		return
 	}
@@ -397,13 +453,15 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 	if current, exists := s.sessions[id]; exists {
 		current.status = "completed"
 		current.contentHash = actualHash
-		current.resourceID = resourceID
-		current.completedPath = completedPath
+		current.resourceID = "sha256:" + actualHash
+		current.completedPath = objectPath
+		current.directory = ""
 	}
 	view := uploadView(s.sessions[id])
 	snapshot := cloneUploadSession(s.sessions[id])
 	s.mu.Unlock()
 	s.persistSession(snapshot)
+	s.removeSessionDirectory(directory)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"uploadId":    id,
 		"resourceId":  view.ResourceID,
@@ -415,14 +473,18 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 func (s *uploadStore) markFailed(id string) {
 	s.mu.Lock()
 	var snapshot *uploadSession
+	directory := ""
 	if session, ok := s.sessions[id]; ok {
 		session.status = "failed"
+		directory = session.directory
+		session.directory = ""
 		clone := cloneUploadSession(session)
 		snapshot = &clone
 	}
 	s.mu.Unlock()
 	if snapshot != nil {
 		s.persistSession(*snapshot)
+		s.removeSessionDirectory(directory)
 	}
 }
 
@@ -435,6 +497,33 @@ func (s *uploadStore) get(id string) (*uploadSession, bool) {
 	}
 	clone := cloneUploadSession(session)
 	return &clone, true
+}
+
+// activeSessionCount reports how many uploads are still in flight. Completed
+// and failed sessions free their slot; their on-disk state is cleaned up.
+func (s *uploadStore) activeSessionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, session := range s.sessions {
+		switch session.status {
+		case "created", "uploading", "verifying":
+			count++
+		}
+	}
+	return count
+}
+
+// removeSessionDirectory best-effort deletes a finished session's part files.
+// Failures are logged only; the upload itself has already been committed or
+// rejected, so cleanup must not change the API outcome.
+func (s *uploadStore) removeSessionDirectory(directory string) {
+	if strings.TrimSpace(directory) == "" {
+		return
+	}
+	if err := os.RemoveAll(directory); err != nil {
+		log.Printf("remove upload directory %s: %v", directory, err)
+	}
 }
 
 type uploadViewModel struct {

@@ -24,9 +24,12 @@ POST  /api/v1/uploads
 GET   /api/v1/uploads/:id
 PATCH /api/v1/uploads/:id/parts/:partNo
 POST  /api/v1/uploads/:id/complete
+GET   /api/v1/files/:resourceId/content   (支持 Range，206/416)
 ```
 
-分片编号从 `0` 开始，分片内容通过请求体发送，SHA-256 通过 `X-Part-SHA256` 请求头提交。该接口当前没有身份校验、配额、Range 下载和跨进程恢复能力，不应直接用于生产部署。
+完成的上传按整文件 SHA-256 提交到 `<uploadRoot>/objects/<h2>/<hash>.bin` 内容寻址存储（同内容去重），`resourceId` 即 `sha256:<hash>`；下载端点由 `http.ServeContent` 提供全量与区间响应。对象池支持总磁盘配额（`LINKOS_CAS_MAX_DISK_BYTES`，默认 0=不限）：超额提交按最旧修改时间淘汰对象，下载会刷新 mtime，因此实际策略为 LRU；单对象大于整个配额时拒绝提交并返回 507 `INSUFFICIENT_STORAGE`；被淘汰对象的 `resourceId` 下载将得到 404（暂无引用保护）。
+
+分片编号从 `0` 开始，分片内容通过请求体发送，SHA-256 通过 `X-Part-SHA256` 请求头提交。上传/下载路由已接入开发态会话鉴权，支持乱序断点续传、跨进程恢复（元数据持久化）与 Range 下载，Web 前端已接入真实传输（8 MiB 分片、4 路并发、分片重试、断点续传与内容寻址下载），整文件 SHA-256 经增量哈希器流式计算、分片按需读取，内存占用与文件大小解耦；服务端已实现单文件大小限额（`LINKOS_UPLOAD_MAX_FILE_SIZE`，默认 10 GiB，超限 413）、活跃会话并发限额（`LINKOS_UPLOAD_MAX_ACTIVE_UPLOADS`，默认 64，超限 429）、完成/失败会话的分片目录清理（CAS 对象保留）以及 CAS 对象池总磁盘配额与 LRU 淘汰；仍缺生产级加固，不应直接用于生产部署。
 
 ## 事件约束
 

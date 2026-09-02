@@ -240,6 +240,7 @@ func main() {
 	}))
 	mux.HandleFunc("/api/v1/uploads", requireActive(auth, "demo", uploads.handleCollection))
 	mux.HandleFunc("/api/v1/uploads/", requireActive(auth, "demo", uploads.handleItem))
+	mux.HandleFunc("/api/v1/files/", requireActive(auth, "demo", uploads.content.handleDownload))
 	mux.HandleFunc("/api/v1/messages", requireActive(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})

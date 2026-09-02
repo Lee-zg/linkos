@@ -56,12 +56,12 @@ func TestUploadRoundTripSupportsResumeAndHashVerification(t *testing.T) {
 		t.Fatalf("complete upload: status=%d body=%s", completeResponse.Code, completeResponse.Body.String())
 	}
 	finalState := getUpload(t, store, session.ID)
-	if finalState.Status != "completed" || finalState.ResourceID == "" {
+	if finalState.Status != "completed" || finalState.ResourceID != "sha256:"+hex.EncodeToString(fullHash[:]) {
 		t.Fatalf("unexpected completed state: %#v", finalState)
 	}
-	completed, err := os.ReadFile(filepath.Join(store.root, session.ID, "complete"))
+	completed, err := os.ReadFile(store.content.objectPath(hex.EncodeToString(fullHash[:])))
 	if err != nil {
-		t.Fatalf("read completed upload: %v", err)
+		t.Fatalf("read content-addressed object: %v", err)
 	}
 	if !bytes.Equal(completed, content) {
 		t.Fatalf("completed content mismatch: %q", completed)
@@ -182,9 +182,9 @@ func TestUploadResumeAcrossRestart(t *testing.T) {
 	if completeResponse.Code != http.StatusCreated {
 		t.Fatalf("complete resumed upload: status=%d body=%s", completeResponse.Code, completeResponse.Body.String())
 	}
-	completed, err := os.ReadFile(filepath.Join(restored.root, session.ID, "complete"))
+	completed, err := os.ReadFile(restored.content.objectPath(hex.EncodeToString(fullHash[:])))
 	if err != nil {
-		t.Fatalf("read completed upload: %v", err)
+		t.Fatalf("read content-addressed object: %v", err)
 	}
 	if !bytes.Equal(completed, content) {
 		t.Fatalf("completed content mismatch: %q", completed)
