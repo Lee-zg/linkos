@@ -94,3 +94,51 @@ func TestRequireActiveReturnsUnauthorizedWithoutSession(t *testing.T) {
 		t.Fatalf("expected 200, got %d", authorized.Code)
 	}
 }
+
+func TestRefreshRotationAndDeviceSurviveRestart(t *testing.T) {
+	path := testSQLitePath(t)
+	backend, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := newAuthStore("demo", "test-passcode", newAccessPolicyWithBackend(backend), newAccessStoreWithBackend(backend))
+	principal, _, code := auth.issueSession(sessionRequest{WorkspaceID: "demo", DisplayName: "Persistent device", AccessType: accessTypeLogin, DeviceID: "dev_persistent", PublicKey: "ed25519-public"})
+	if code != "" {
+		t.Fatalf("issue session: %s", code)
+	}
+	refreshToken := principal.RefreshToken
+	if err := backend.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored := newAuthStore("demo", "test-passcode", newAccessPolicyWithBackend(reopened), newAccessStoreWithBackend(reopened))
+	rotated, ok := restored.rotateRefresh(refreshToken)
+	if !ok || rotated.UserID != principal.UserID || rotated.DeviceID != "dev_persistent" {
+		t.Fatalf("unexpected rotated principal: %+v ok=%t", rotated, ok)
+	}
+	if _, reused := restored.rotateRefresh(refreshToken); reused {
+		t.Fatal("refresh tokens must be single use")
+	}
+	if len(restored.listDevices()) != 1 {
+		t.Fatalf("device registration did not survive restart: %+v", restored.listDevices())
+	}
+}
+
+func TestRolePermissionMatrix(t *testing.T) {
+	for _, permission := range []string{"workspace.read", "resource.write", "chat.send", "code.write", "job.submit", "plugin.manage", "device.manage"} {
+		if !roleAllows("owner", permission) || !roleAllows("admin", permission) {
+			t.Fatalf("owner/admin must allow %s", permission)
+		}
+	}
+	if !roleAllows("member", "job.submit") || roleAllows("member", "plugin.manage") {
+		t.Fatal("member permission matrix is incorrect")
+	}
+	if !roleAllows("guest", "resource.read") || roleAllows("guest", "resource.write") {
+		t.Fatal("guest permission matrix is incorrect")
+	}
+}

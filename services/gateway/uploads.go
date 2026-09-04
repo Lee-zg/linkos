@@ -580,5 +580,7 @@ func isSafeUploadID(value string) bool {
 }
 
 func writeAPIError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]string{"error": code, "message": message})
+	traceID := fmt.Sprintf("tr_%x", time.Now().UTC().UnixNano())
+	w.Header().Set("X-Trace-ID", traceID)
+	writeJSON(w, status, map[string]string{"error": code, "message": message, "traceId": traceID})
 }

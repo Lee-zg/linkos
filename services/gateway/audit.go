@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,37 +20,43 @@ const (
 )
 
 type auditEntry struct {
-	ID          string
-	At          time.Time
-	ActorUserID string
-	ActorName   string
-	Action      string
-	Target      string
-	Detail      string
-	RemoteAddr  string
+	ID           string
+	At           time.Time
+	ActorUserID  string
+	ActorName    string
+	Action       string
+	Target       string
+	Detail       string
+	RemoteAddr   string
+	PreviousHash string
+	Hash         string
 }
 
 type auditEntryView struct {
-	ID          string `json:"id"`
-	At          string `json:"at"`
-	ActorUserID string `json:"actorUserId,omitempty"`
-	ActorName   string `json:"actorName,omitempty"`
-	Action      string `json:"action"`
-	Target      string `json:"target,omitempty"`
-	Detail      string `json:"detail,omitempty"`
-	RemoteAddr  string `json:"remoteAddr,omitempty"`
+	ID           string `json:"id"`
+	At           string `json:"at"`
+	ActorUserID  string `json:"actorUserId,omitempty"`
+	ActorName    string `json:"actorName,omitempty"`
+	Action       string `json:"action"`
+	Target       string `json:"target,omitempty"`
+	Detail       string `json:"detail,omitempty"`
+	RemoteAddr   string `json:"remoteAddr,omitempty"`
+	PreviousHash string `json:"previousHash,omitempty"`
+	Hash         string `json:"hash,omitempty"`
 }
 
 func auditEntryToView(entry auditEntry) auditEntryView {
 	return auditEntryView{
-		ID:          entry.ID,
-		At:          entry.At.Format(time.RFC3339),
-		ActorUserID: entry.ActorUserID,
-		ActorName:   entry.ActorName,
-		Action:      entry.Action,
-		Target:      entry.Target,
-		Detail:      entry.Detail,
-		RemoteAddr:  entry.RemoteAddr,
+		ID:           entry.ID,
+		At:           entry.At.Format(time.RFC3339),
+		ActorUserID:  entry.ActorUserID,
+		ActorName:    entry.ActorName,
+		Action:       entry.Action,
+		Target:       entry.Target,
+		Detail:       entry.Detail,
+		RemoteAddr:   entry.RemoteAddr,
+		PreviousHash: entry.PreviousHash,
+		Hash:         entry.Hash,
 	}
 }
 
@@ -57,10 +64,11 @@ func auditEntryToView(entry auditEntry) auditEntryView {
 // persistBackend the trail survives restarts; the memory backend keeps the
 // previous ephemeral behavior for tests and the default dev mode.
 type auditStore struct {
-	mu      sync.Mutex
-	backend persistBackend
-	entries []auditEntry
-	counter int
+	mu       sync.Mutex
+	backend  persistBackend
+	entries  []auditEntry
+	counter  int
+	lastHash string
 }
 
 func newAuditStore() *auditStore { return newAuditStoreWithBackend(memoryBackend{}) }
@@ -77,6 +85,11 @@ func newAuditStoreWithBackend(backend persistBackend) *auditStore {
 	}
 	s.entries = stored
 	s.counter = counter
+	for _, entry := range s.entries {
+		if entry.Hash != "" {
+			s.lastHash = entry.Hash
+		}
+	}
 	return s
 }
 
@@ -87,6 +100,11 @@ func (s *auditStore) record(entry auditEntry) string {
 	if entry.At.IsZero() {
 		entry.At = time.Now().UTC()
 	}
+	entry.PreviousHash = s.lastHash
+	canonical := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s", entry.ID, entry.At.Format(time.RFC3339Nano), entry.ActorUserID, entry.ActorName, entry.Action, entry.Target, entry.Detail, entry.PreviousHash)
+	digest := sha256.Sum256([]byte(canonical))
+	entry.Hash = fmt.Sprintf("%x", digest[:])
+	s.lastHash = entry.Hash
 	s.entries = append(s.entries, entry)
 	if len(s.entries) > auditCapacity {
 		kept := make([]auditEntry, auditCapacity)

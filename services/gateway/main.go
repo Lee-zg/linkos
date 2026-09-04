@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -137,15 +138,33 @@ const messageDedupRetention = 1000
 type hub struct {
 	mu        sync.Mutex
 	store     eventStore
-	clients   map[*websocket.Conn]chan []byte
+	clients   map[*websocket.Conn]*wsClient
 	seen      map[string]event
 	seenOrder []string
+}
+
+type wsClient struct {
+	queue   chan []byte
+	filters map[string]struct{}
+}
+
+var unknownWSEvents atomic.Int64
+var slowWSClients atomic.Int64
+var messageSearchRequests atomic.Int64
+var messageSearchNanos atomic.Int64
+
+func (c *wsClient) allows(kind string) bool {
+	if len(c.filters) == 0 {
+		return true
+	}
+	_, ok := c.filters[kind]
+	return ok
 }
 
 func newHub() *hub {
 	return &hub{
 		store:   newMemoryEventStore(eventRetention),
-		clients: make(map[*websocket.Conn]chan []byte),
+		clients: make(map[*websocket.Conn]*wsClient),
 		seen:    make(map[string]event),
 	}
 }
@@ -156,7 +175,7 @@ func newHubWithStore(store eventStore) *hub {
 	}
 	h := &hub{
 		store:   store,
-		clients: make(map[*websocket.Conn]chan []byte),
+		clients: make(map[*websocket.Conn]*wsClient),
 		seen:    make(map[string]event),
 	}
 	h.seedDedupFromRetained()
@@ -208,11 +227,25 @@ func (h *hub) emitLocked(kind string, payload interface{}) event {
 	if err != nil {
 		return e
 	}
-	for _, queue := range h.clients {
+	for _, client := range h.clients {
+		if !client.allows(kind) {
+			continue
+		}
 		select {
-		case queue <- b:
+		case client.queue <- b:
 		default:
-			log.Printf("dropping event for slow client: %s", kind)
+			slowWSClients.Add(1)
+			select {
+			case <-client.queue:
+			default:
+			}
+			snapshot := event{1, "workspace.snapshot.required", systemEventID("slow", e.Seq), e.Seq, time.Now().UTC().Format(time.RFC3339Nano), "demo", "gateway", map[string]interface{}{"reason": "slow_client", "currentEventSeq": e.Seq}}
+			if frame, marshalErr := json.Marshal(snapshot); marshalErr == nil {
+				select {
+				case client.queue <- frame:
+				default:
+				}
+			}
 		}
 	}
 	return e
@@ -278,8 +311,15 @@ func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	queue := make(chan []byte, 32)
+	filters := make(map[string]struct{})
+	for _, kind := range strings.Split(r.URL.Query().Get("events"), ",") {
+		if kind = strings.TrimSpace(kind); kind != "" {
+			filters[kind] = struct{}{}
+		}
+	}
+	client := &wsClient{queue: queue, filters: filters}
 	h.mu.Lock()
-	h.clients[conn] = queue
+	h.clients[conn] = client
 	currentSeq := h.store.CurrentSeq()
 	history, replayable := h.store.Since(lastSeq)
 	h.mu.Unlock()
@@ -295,6 +335,9 @@ func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for _, historicalEvent := range history {
+			if !client.allows(historicalEvent.Type) {
+				continue
+			}
 			if err := conn.WriteJSON(historicalEvent); err != nil {
 				return
 			}
@@ -308,9 +351,30 @@ func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
 			return
 		}
+		if string(raw) == "ping" {
+			continue
+		}
+		var command struct {
+			Type   string   `json:"type"`
+			Events []string `json:"events"`
+		}
+		if json.Unmarshal(raw, &command) == nil && command.Type == "subscribe" {
+			next := make(map[string]struct{}, len(command.Events))
+			for _, kind := range command.Events {
+				if kind = strings.TrimSpace(kind); kind != "" {
+					next[kind] = struct{}{}
+				}
+			}
+			h.mu.Lock()
+			client.filters = next
+			h.mu.Unlock()
+			continue
+		}
+		unknownWSEvents.Add(1)
 	}
 }
 
@@ -319,9 +383,13 @@ func systemEventID(kind string, seq int64) string {
 }
 
 func main() {
+	log.SetFlags(0)
 	if len(os.Args) > 1 {
 		runMaintenanceCommand(os.Args[1:])
 		return
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("LINKOS_ENV")), "production") && len(pluginTrustedKeys()) == 0 {
+		log.Fatal("LINKOS_PLUGIN_TRUSTED_KEYS is required when LINKOS_ENV=production")
 	}
 	backend := openBackend()
 	defer backend.Close()
@@ -330,68 +398,50 @@ func main() {
 	auth := newAuthStore("demo", adminPasscode(), newAccessPolicyWithBackend(backend), newAccessStoreWithBackend(backend))
 	audit := newAuditStoreWithBackend(backend)
 	sessionLimiter := newRateLimiter(12, 0.5)
+	mvp := newMVPStore(backend, h)
+	mvp.audit = audit
+	mvp.contentDownload = uploads.content.handleDownload
+	mvp.content = uploads.content
+	registerMVPAuth(mvp, auth)
+	discovery := newDiscoveryService()
+	defer discovery.close()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"status": "ok", "service": "gateway", "time": time.Now().UTC()})
 	})
 	mux.HandleFunc("/api/v1/discovery", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, 200, map[string]interface{}{"workspaces": []interface{}{map[string]interface{}{"id": "demo", "name": "Nimbus Lab", "address": "http://127.0.0.1:8787", "onlineMembers": 12, "tls": false}}})
+		workspaces := []interface{}{map[string]interface{}{"id": "demo", "name": "Nimbus Lab", "address": "http://127.0.0.1:8787", "version": "0.1.0", "onlineMembers": 12, "tls": false, "source": "gateway"}}
+		for _, peer := range discovery.list() {
+			workspaces = append(workspaces, peer)
+		}
+		writeJSON(w, 200, map[string]interface{}{"workspaces": workspaces})
 	})
 	registerAccessRoutes(mux, auth, h, audit, sessionLimiter)
 	mux.HandleFunc("/api/v1/workspaces/demo/snapshot", requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, snapshot()) }))
-	mux.HandleFunc("/api/v1/resources", requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, 200, map[string]interface{}{"items": []interface{}{map[string]string{"id": "file_release", "type": "file", "name": "release-candidate.tar.gz"}, map[string]string{"id": "project_gateway", "type": "code.project", "name": "api-gateway"}}, "nextCursor": ""})
-	}))
 	mux.HandleFunc("/api/v1/uploads", requireActive(auth, "demo", uploads.handleCollection))
 	mux.HandleFunc("/api/v1/uploads/", requireActive(auth, "demo", uploads.handleItem))
 	mux.HandleFunc("/api/v1/files/", requireActive(auth, "demo", uploads.content.handleDownload))
-	mux.HandleFunc("/api/v1/messages", requireActive(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
-			return
-		}
-		var body struct {
-			Body        string `json:"body"`
-			ChannelID   string `json:"channelId"`
-			ClientMsgID string `json:"clientMsgId"`
-		}
-		if json.NewDecoder(r.Body).Decode(&body) != nil || strings.TrimSpace(body.Body) == "" {
-			writeJSON(w, 400, map[string]string{"error": "invalid_message"})
-			return
-		}
-		e, duplicate := h.publishMessage(body.Body, body.ChannelID, body.ClientMsgID)
-		status := http.StatusCreated
-		state := "accepted"
-		if duplicate {
-			status = http.StatusOK
-			state = "duplicate"
-		}
-		writeJSON(w, status, map[string]interface{}{
-			"messageId":   e.EventID,
-			"serverMsgId": e.EventID,
-			"seq":         e.Seq,
-			"status":      state,
-		})
-	}))
-	mux.HandleFunc("/api/v1/jobs", requireActive(auth, "demo", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			writeJSON(w, 405, map[string]string{"error": "method_not_allowed"})
-			return
-		}
-		var spec map[string]interface{}
-		_ = json.NewDecoder(r.Body).Decode(&spec)
-		id := "job_" + time.Now().UTC().Format("150405.000")
-		writeJSON(w, 202, map[string]interface{}{"id": id, "status": "queued", "runnerId": "runner-02"})
-		go simulateJob(h, id, spec)
-	}))
-	mux.HandleFunc("/api/v1/plugins", requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, 200, map[string]interface{}{"items": []interface{}{plugin("files.core", "文件", "0.1.0"), plugin("chat.core", "聊天", "0.1.0"), plugin("code.workbench", "代码工作台", "0.1.0"), plugin("runner.exec", "运行任务", "0.1.0")}})
-	}))
+	registerMVPRoutes(mux, auth, mvp)
+	handleJobRoutes(mux, auth, mvp)
 	mux.HandleFunc("/api/v1/ws", requireActive(auth, "demo", h.handleWS))
-	server := &http.Server{Addr: ":8787", Handler: cors(mux), ReadHeaderTimeout: 5 * time.Second}
-	log.Printf("LinkOS Gateway listening on %s", server.Addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	address := strings.TrimSpace(os.Getenv("LINKOS_LISTEN"))
+	if address == "" {
+		address = ":8787"
+	}
+	server := &http.Server{Addr: address, Handler: cors(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
+	certFile, keyFile := strings.TrimSpace(os.Getenv("LINKOS_TLS_CERT_FILE")), strings.TrimSpace(os.Getenv("LINKOS_TLS_KEY_FILE"))
+	if (certFile == "") != (keyFile == "") {
+		log.Fatal("LINKOS_TLS_CERT_FILE and LINKOS_TLS_KEY_FILE must be configured together")
+	}
+	log.Printf(`{"level":"info","service":"gateway","message":"listening","address":%q,"tls":%t}`, server.Addr, certFile != "")
+	var serveErr error
+	if certFile != "" {
+		serveErr = server.ListenAndServeTLS(certFile, keyFile)
+	} else {
+		serveErr = server.ListenAndServe()
+	}
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		log.Fatal(serveErr)
 	}
 }
 
@@ -455,9 +505,33 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 }
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
+		traceID := fmt.Sprintf("tr_%x", time.Now().UTC().UnixNano())
+		w.Header().Set("X-Trace-ID", traceID)
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		allowedOrigins := strings.TrimSpace(os.Getenv("LINKOS_ALLOWED_ORIGINS"))
+		allowed := origin == "" || allowedOrigins == ""
+		if !allowed {
+			for _, candidate := range strings.Split(allowedOrigins, ",") {
+				if strings.TrimSpace(candidate) == origin {
+					allowed = true
+					break
+				}
+			}
+		}
+		if !allowed {
+			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "origin is not allowed")
+			return
+		}
+		if origin != "" {
+			if allowedOrigins == "" {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Add("Vary", "Origin")
+			}
+		}
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Runner-Token, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)
 			return

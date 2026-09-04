@@ -12,6 +12,10 @@ dist/
 .vscode/
 coverage/
 tmp/
+.tmp/
+.gocache-*/
+test-results/
+apps/web/test-results/
 *.tsbuildinfo
 
 .history

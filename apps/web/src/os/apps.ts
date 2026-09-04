@@ -102,5 +102,5 @@ export function getApp(id: AppId): AppDefinition {
 }
 
 export function visibleApps(role: string): AppDefinition[] {
-  return apps.filter((app) => app.id !== "admin" || role === "admin");
+  return apps.filter((app) => app.id !== "admin" || role === "admin" || role === "owner");
 }

@@ -8,9 +8,103 @@ export type ResourceType =
   | "job"
   | "plugin";
 
+export type Permission =
+  | "workspace.read"
+  | "member.manage"
+  | "device.manage"
+  | "resource.read"
+  | "resource.write"
+  | "chat.read"
+  | "chat.send"
+  | "chat.moderate"
+  | "code.read"
+  | "code.write"
+  | "code.run"
+  | "job.submit"
+  | "job.cancel"
+  | "runner.read"
+  | "plugin.read"
+  | "plugin.install"
+  | "plugin.manage"
+  | string;
+
+export type Role = "owner" | "admin" | "member" | "guest";
+
+export interface CursorPage<T> {
+  items: T[];
+  nextCursor?: string;
+}
+
+export interface DiscoveryWorkspace {
+  id: string;
+  name: string;
+  address: string;
+  version?: string;
+  onlineMembers: number;
+  tls: boolean;
+  source?: "mdns" | "udp" | "manual" | "gateway";
+}
+
+export interface DeviceRegistrationInput {
+  workspaceId: string;
+  publicKey: string;
+  displayName: string;
+  inviteCode?: string;
+}
+
+export interface DeviceRegistration {
+  id: string;
+  userId: string;
+  workspaceId: string;
+  displayName: string;
+  publicKey: string;
+  createdAt: string;
+  lastSeenAt: string;
+  revokedAt?: string;
+}
+
+export interface TokenRefreshResult {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  workspaceId: string;
+  userId: string;
+  role: Role | string;
+}
+
+export interface ResourceAcl {
+  ownerId?: string;
+  grants: Array<{ subject: string; actions: Permission[] }>;
+}
+
 export interface ResourceRef {
   type: ResourceType | string;
   id: string;
+}
+
+export interface ResourceRecord {
+  id: string;
+  workspaceId: string;
+  type: ResourceType | string;
+  name: string;
+  parentId?: string;
+  ownerId?: string;
+  acl?: ResourceAcl;
+  meta?: Record<string, string | number | boolean>;
+  createdAt: string;
+  updatedAt: string;
+  lastAccessedAt?: string;
+}
+
+export interface ResourceShareLink {
+  token: string;
+  resourceId: string;
+  expiresAt: string;
+  singleUse: boolean;
+  createdBy: string;
+  createdAt: string;
+  usedAt?: string;
+  revokedAt?: string;
 }
 
 export interface DomainEvent<T = unknown> {
@@ -88,6 +182,9 @@ export interface AuditEntry {
   target?: string;
   detail?: string;
   remoteAddr?: string;
+  traceId?: string;
+  previousHash?: string;
+  hash?: string;
 }
 
 export interface SessionCreateInput {
@@ -96,10 +193,15 @@ export interface SessionCreateInput {
   accessType: AccessType;
   passcode?: string;
   note?: string;
+  deviceId?: string;
+  publicKey?: string;
+  inviteCode?: string;
 }
 
 export interface SessionToken {
   accessToken: string;
+  refreshToken?: string;
+  deviceId?: string;
   expiresIn: number;
   workspaceId: string;
   userId: string;
@@ -122,6 +224,49 @@ export interface MessageCreateInput {
   body: string;
   channelId: string;
   clientMsgId: string;
+  threadId?: string;
+  mentions?: string[];
+  blocks?: MessageBlock[];
+}
+
+export interface MessageBlock {
+  type: "text" | "file.reference" | "code.reference" | "run.result";
+  value: Record<string, unknown>;
+}
+
+export interface ChatChannel {
+  id: string;
+  workspaceId: string;
+  name: string;
+  kind: "channel" | "direct";
+  memberIds: string[];
+  createdAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  channelId: string;
+  threadId?: string;
+  authorId: string;
+  authorName: string;
+  body: string;
+  blocks?: MessageBlock[];
+  mentions?: string[];
+  clientMsgId?: string;
+  createdAt: string;
+  editedAt?: string;
+  deletedAt?: string;
+  version: number;
+}
+
+export interface MessageSearchQuery {
+  channelId?: string;
+  authorId?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+  cursor?: string;
+  limit?: number;
 }
 
 export interface AcceptedMessage {
@@ -241,11 +386,115 @@ export interface JobSpec {
   memoryMb: number;
   network: "deny" | "allowlist";
   priority?: "low" | "normal" | "high";
+  env?: Record<string, string>;
+  artifactGlobs?: string[];
 }
 export interface JobRef {
   id: string;
   status: JobStatus;
   runnerId?: string;
+  createdAt?: string;
+  startedAt?: string;
+  endedAt?: string;
+}
+
+export interface JobLogChunk {
+  jobId: string;
+  seq: number;
+  level: "debug" | "info" | "warn" | "error";
+  chunk: string;
+  at: string;
+}
+
+export interface JobArtifact {
+  id: string;
+  jobId: string;
+  name: string;
+  resourceId?: string;
+  size: number;
+  contentHash?: string;
+  createdAt: string;
+}
+
+export interface RunnerInfo {
+  id: string;
+  workspaceId: string;
+  platform: string;
+  version: string;
+  capabilities: string[];
+  labels: Record<string, string>;
+  status: "online" | "paused" | "draining" | "offline";
+  lastSeenAt: string;
+  credentialVersion?: number;
+  revokedAt?: string;
+}
+
+export interface RunnerRegistrationToken {
+  token: string;
+  expiresAt: string;
+  singleUse: true;
+}
+
+export interface RunnerRegistration {
+  runner: RunnerInfo;
+  credential: string;
+}
+
+export type PluginStatus =
+  | "discovered"
+  | "installed"
+  | "enabled"
+  | "disabled"
+  | "uninstalled"
+  | "failed";
+
+export interface PluginRecord {
+  id: string;
+  name: string;
+  version: string;
+  apiVersion: string;
+  status: PluginStatus;
+  manifest: PluginManifest;
+  signature?: string;
+  permissions: string[];
+  installedAt?: string;
+  health?: "healthy" | "degraded" | "failed";
+  previous?: { manifest: PluginManifest; signature?: string; status: PluginStatus };
+}
+
+export interface CodeFile {
+  id: string;
+  projectId: string;
+  path: string;
+  language: string;
+  size: number;
+  contentHash: string;
+  version: string;
+  updatedAt: string;
+}
+
+export interface CodeVersion {
+  id: string;
+  fileId: string;
+  version: string;
+  contentHash: string;
+  content: string;
+  createdBy: string;
+  createdAt: string;
+  diffSummary?: { added: number; removed: number };
+}
+
+export interface CodeSaveInput {
+  content: string;
+  baseVersion: string;
+  message?: string;
+}
+
+export interface CodeConflict {
+  error: "RESOURCE_VERSION_MISMATCH";
+  current: CodeVersion;
+  baseVersion: string;
+  diff: string;
 }
 
 export const EVENT_TYPES = {
@@ -253,9 +502,14 @@ export const EVENT_TYPES = {
   workspaceSnapshotRequired: "workspace.snapshot.required",
   chatMessageCreated: "chat.message.created",
   jobStatusChanged: "job.status.changed",
-  jobLogChunk: "job.log.chunk",
   accessRecordCreated: "access.record.created",
   accessRecordApproved: "access.record.approved",
   accessRecordRejected: "access.record.rejected",
   accessPolicyUpdated: "access.policy.updated",
+  chatMessageUpdated: "chat.message.updated",
+  chatMessageDeleted: "chat.message.deleted",
+  jobLogChunk: "job.log.chunk",
+  runnerUpdated: "runner.updated",
+  pluginUpdated: "plugin.updated",
+  codeVersionCreated: "code.version.created",
 } as const;

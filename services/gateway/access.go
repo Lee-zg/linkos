@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,6 +19,9 @@ const defaultAdminPasscode = "linkos-admin"
 func adminPasscode() string {
 	if code := strings.TrimSpace(os.Getenv("LINKOS_ADMIN_PASSCODE")); code != "" {
 		return code
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("LINKOS_ENV")), "production") {
+		log.Fatal("LINKOS_ADMIN_PASSCODE is required when LINKOS_ENV=production")
 	}
 	return defaultAdminPasscode
 }
@@ -220,6 +225,9 @@ func handleSessionIssue(auth *authStore, h *hub, audit *auditStore, limiter *rat
 			AccessType  string `json:"accessType"`
 			Passcode    string `json:"passcode"`
 			Note        string `json:"note"`
+			DeviceID    string `json:"deviceId"`
+			PublicKey   string `json:"publicKey"`
+			InviteCode  string `json:"inviteCode"`
 		}
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -231,6 +239,9 @@ func handleSessionIssue(auth *authStore, h *hub, audit *auditStore, limiter *rat
 			Passcode:    body.Passcode,
 			Note:        body.Note,
 			RemoteAddr:  r.RemoteAddr,
+			DeviceID:    body.DeviceID,
+			PublicKey:   body.PublicKey,
+			InviteCode:  body.InviteCode,
 		})
 		switch errCode {
 		case "":
@@ -244,14 +255,16 @@ func handleSessionIssue(auth *authStore, h *hub, audit *auditStore, limiter *rat
 			})
 			h.emit("access.record.created", accessRecordToView(&record))
 			writeJSON(w, http.StatusCreated, map[string]interface{}{
-				"accessToken": principal.Token,
-				"expiresIn":   int(sessionTTL.Seconds()),
-				"workspaceId": principal.WorkspaceID,
-				"userId":      principal.UserID,
-				"displayName": principal.DisplayName,
-				"role":        principal.Role,
-				"accessType":  principal.AccessType,
-				"status":      principal.Status,
+				"accessToken":  principal.Token,
+				"refreshToken": principal.RefreshToken,
+				"deviceId":     principal.DeviceID,
+				"expiresIn":    int(sessionTTL.Seconds()),
+				"workspaceId":  principal.WorkspaceID,
+				"userId":       principal.UserID,
+				"displayName":  principal.DisplayName,
+				"role":         principal.Role,
+				"accessType":   principal.AccessType,
+				"status":       principal.Status,
 			})
 		case "ACCESS_DENIED":
 			requestedType := strings.TrimSpace(body.AccessType)
@@ -272,6 +285,150 @@ func handleSessionIssue(auth *authStore, h *hub, audit *auditStore, limiter *rat
 	}
 }
 
+func handleSessionRefresh(auth *authStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method not allowed")
+			return
+		}
+		var body struct {
+			RefreshToken string `json:"refreshToken"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil || strings.TrimSpace(body.RefreshToken) == "" {
+			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "refreshToken is required")
+			return
+		}
+		principal, ok := auth.rotateRefresh(strings.TrimSpace(body.RefreshToken))
+		if !ok {
+			writeAPIError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "refresh token is invalid or expired")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"accessToken": principal.Token, "refreshToken": principal.RefreshToken, "deviceId": principal.DeviceID, "expiresIn": int(sessionTTL.Seconds()), "workspaceId": principal.WorkspaceID, "userId": principal.UserID, "displayName": principal.DisplayName, "role": principal.Role, "accessType": principal.AccessType, "status": principal.Status})
+	}
+}
+
+func handleSessionRevoke(auth *authStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method not allowed")
+			return
+		}
+		principal, ok := auth.authenticateRequest(r, "")
+		if !ok {
+			writeAPIError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "valid workspace session required")
+			return
+		}
+		auth.revokeSession(principal.Token)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+	}
+}
+
+func handleDevices(auth *authStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := auth.authenticateRequest(r, "")
+		if !ok {
+			writeAPIError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "valid workspace session required")
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			if !roleAllows(principal.Role, "device.manage") {
+				writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "admin role required")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"items": auth.listDevices(), "nextCursor": ""})
+		case http.MethodPost:
+			var body struct{ WorkspaceID, PublicKey, DisplayName, InviteCode string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if strings.TrimSpace(body.WorkspaceID) != "" && strings.TrimSpace(body.WorkspaceID) != principal.WorkspaceID {
+				writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "workspaceId does not match session")
+				return
+			}
+			if strings.TrimSpace(body.PublicKey) == "" || strings.TrimSpace(body.DisplayName) == "" {
+				writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "publicKey and displayName are required")
+				return
+			}
+			if code := strings.TrimSpace(body.InviteCode); code != "" {
+				auth.mu.Lock()
+				expires, exists := auth.invites[code]
+				valid := exists && !auth.usedInvites[code] && time.Now().UTC().Before(expires)
+				if valid {
+					auth.usedInvites[code] = true
+					auth.persistAuthLocked()
+				}
+				auth.mu.Unlock()
+				if !valid {
+					writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invite code is invalid or expired")
+					return
+				}
+			}
+			bytes := make([]byte, 16)
+			if _, err := rand.Read(bytes); err != nil {
+				writeAPIError(w, 500, "INTERNAL_ERROR", "could not create device")
+				return
+			}
+			id := "dev_" + base64.RawURLEncoding.EncodeToString(bytes)
+			now := time.Now().UTC()
+			device := deviceRecord{ID: id, UserID: principal.UserID, WorkspaceID: principal.WorkspaceID, DisplayName: strings.TrimSpace(body.DisplayName), PublicKey: strings.TrimSpace(body.PublicKey), CreatedAt: now, LastSeenAt: now}
+			auth.mu.Lock()
+			auth.devices[id] = device
+			auth.persistAuthLocked()
+			auth.mu.Unlock()
+			writeJSON(w, http.StatusCreated, device)
+		default:
+			writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method not allowed")
+		}
+	}
+}
+
+func handleInvites(auth *authStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := auth.authenticateRequest(r, "")
+		if !ok {
+			writeAPIError(w, 401, "AUTH_REQUIRED", "valid workspace session required")
+			return
+		}
+		if principal.Role != roleAdmin && principal.Role != "owner" {
+			writeAPIError(w, 403, "FORBIDDEN", "admin role required")
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
+			return
+		}
+		code, expires, ok := auth.createInvite()
+		if !ok {
+			writeAPIError(w, 500, "INTERNAL_ERROR", "could not create invite")
+			return
+		}
+		writeJSON(w, 201, map[string]interface{}{"code": code, "expiresAt": expires.Format(time.RFC3339), "singleUse": true})
+	}
+}
+
+func handleDeviceItem(auth *authStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := auth.authenticateRequest(r, "")
+		if !ok || (principal.Role != roleAdmin && principal.Role != "owner") {
+			if !ok {
+				writeAPIError(w, 401, "AUTH_REQUIRED", "valid workspace session required")
+			} else {
+				writeAPIError(w, 403, "FORBIDDEN", "admin role required")
+			}
+			return
+		}
+		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/devices/"), "/")
+		if r.Method != http.MethodPost {
+			writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
+			return
+		}
+		if !auth.revokeDevice(id) {
+			writeAPIError(w, 404, "INVALID_REQUEST", "device not found")
+			return
+		}
+		writeJSON(w, 200, map[string]string{"id": id, "status": "revoked"})
+	}
+}
+
 func handleMe(auth *authStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := auth.authenticateRequest(r, "")
@@ -287,6 +444,50 @@ func handleMe(auth *authStore) http.HandlerFunc {
 			"status":      principal.Status,
 			"workspaceId": principal.WorkspaceID,
 		})
+	}
+}
+
+func handleMembers(auth *authStore, audit *auditStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := auth.authenticateRequest(r, "")
+		if !ok {
+			writeAPIError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "valid workspace session required")
+			return
+		}
+		if principal.Role != roleAdmin && principal.Role != "owner" {
+			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "admin role required")
+			return
+		}
+		if r.URL.Path == "/api/v1/admin/members" {
+			if r.Method != http.MethodGet {
+				writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method not allowed")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"items": auth.listMembers(), "nextCursor": ""})
+			return
+		}
+		if r.Method != http.MethodPatch {
+			writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method not allowed")
+			return
+		}
+		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/admin/members/"), "/")
+		var input struct {
+			Role string `json:"role"`
+		}
+		if json.NewDecoder(r.Body).Decode(&input) != nil || (input.Role != "owner" && input.Role != roleAdmin && input.Role != roleMember && input.Role != "guest") {
+			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid role is required")
+			return
+		}
+		if input.Role == "owner" && principal.Role != "owner" {
+			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "only an owner can grant owner role")
+			return
+		}
+		if !auth.setUserRole(id, input.Role) {
+			writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "member not found")
+			return
+		}
+		audit.record(auditEntry{ActorUserID: principal.UserID, ActorName: principal.DisplayName, Action: "member.role.update", Target: id, Detail: input.Role, RemoteAddr: r.RemoteAddr})
+		writeJSON(w, http.StatusOK, map[string]string{"userId": id, "role": input.Role})
 	}
 }
 
@@ -408,7 +609,7 @@ func requireAdmin(auth *authStore, handler http.HandlerFunc) http.HandlerFunc {
 			writeAPIError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "valid workspace session required")
 			return
 		}
-		if principal.Role != roleAdmin {
+		if principal.Role != roleAdmin && principal.Role != "owner" {
 			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "admin role required")
 			return
 		}
@@ -419,10 +620,17 @@ func requireAdmin(auth *authStore, handler http.HandlerFunc) http.HandlerFunc {
 func registerAccessRoutes(mux *http.ServeMux, auth *authStore, h *hub, audit *auditStore, limiter *rateLimiter) {
 	admin := &accessAdmin{auth: auth, hub: h, audit: audit}
 	mux.HandleFunc("/api/v1/sessions", handleSessionIssue(auth, h, audit, limiter))
+	mux.HandleFunc("/api/v1/sessions/refresh", handleSessionRefresh(auth))
+	mux.HandleFunc("/api/v1/sessions/revoke", handleSessionRevoke(auth))
 	mux.HandleFunc("/api/v1/me", handleMe(auth))
 	mux.HandleFunc("/api/v1/access-policy", handlePublicPolicy(auth.policy))
 	mux.HandleFunc("/api/v1/admin/access-policy", requireAdmin(auth, admin.handlePolicy))
 	mux.HandleFunc("/api/v1/admin/access-records", requireAdmin(auth, admin.handleRecords))
 	mux.HandleFunc("/api/v1/admin/access-records/", requireAdmin(auth, admin.handleRecordAction))
 	mux.HandleFunc("/api/v1/admin/audit-log", requireAdmin(auth, handleAuditLog(audit)))
+	mux.HandleFunc("/api/v1/devices", handleDevices(auth))
+	mux.HandleFunc("/api/v1/devices/", handleDeviceItem(auth))
+	mux.HandleFunc("/api/v1/admin/invites", handleInvites(auth))
+	mux.HandleFunc("/api/v1/admin/members", handleMembers(auth, audit))
+	mux.HandleFunc("/api/v1/admin/members/", handleMembers(auth, audit))
 }

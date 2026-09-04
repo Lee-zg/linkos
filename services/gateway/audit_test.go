@@ -38,6 +38,19 @@ func TestAuditStoreRecordsNewestFirstAndBounds(t *testing.T) {
 	}
 }
 
+func TestAuditEntriesFormHashChain(t *testing.T) {
+	store := newAuditStore()
+	store.record(auditEntry{Action: "resource.write", Target: "one"})
+	store.record(auditEntry{Action: "resource.write", Target: "two"})
+	entries := store.list()
+	if len(entries) != 2 || entries[0].Hash == "" || entries[1].Hash == "" {
+		t.Fatalf("missing audit hashes: %+v", entries)
+	}
+	if entries[0].PreviousHash != entries[1].Hash {
+		t.Fatalf("hash chain is broken: newest=%+v previous=%+v", entries[0], entries[1])
+	}
+}
+
 func TestSessionIssueWritesAuditEntries(t *testing.T) {
 	auth, hub := newTestGateway()
 	audit := newAuditStore()

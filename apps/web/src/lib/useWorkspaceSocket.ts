@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DomainEvent } from "@linkos/protocol";
-import { ensureSession, getSessionToken } from "./api";
+import { ensureSession, getGatewayBase, getSessionToken } from "./api";
 
 type SocketPayload = {
   body?: string;
@@ -64,7 +64,8 @@ export function useWorkspaceSocket({ onEvent }: WorkspaceSocketOptions = {}) {
         scheduleReconnect();
         return;
       }
-      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      const gateway = getGatewayBase() ? new URL(getGatewayBase()) : window.location;
+      const protocol = gateway.protocol === "https:" ? "wss" : "ws";
       const query = new URLSearchParams({ workspace: "demo" });
       query.set("access_token", getSessionToken() ?? token);
       if (lastSeqRef.current > 0)
@@ -72,7 +73,7 @@ export function useWorkspaceSocket({ onEvent }: WorkspaceSocketOptions = {}) {
 
       try {
         socket = new WebSocket(
-          `${protocol}://${window.location.host}/api/v1/ws?${query.toString()}`,
+          `${protocol}://${gateway.host}/api/v1/ws?${query.toString()}`,
         );
       } catch {
         setConnected(false);

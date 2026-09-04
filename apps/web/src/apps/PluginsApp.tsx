@@ -1,137 +1,44 @@
-import { useState } from "react";
-import { Code2, Files, MessageSquare, Terminal } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import type { PluginManifest, PluginRecord } from "@linkos/protocol";
+import { Eye, PackagePlus, RotateCcw, ShieldCheck } from "lucide-react";
+import { installPlugin, listPlugins, setPluginStatus } from "../lib/api";
 import { useWorkspace } from "../lib/workspace";
 import { useToast } from "../os/Toaster";
-
-type Plugin = {
-  id: string;
-  name: string;
-  desc: string;
-  version: string;
-  enabled: boolean;
-  icon: LucideIcon;
-  gradient: string;
-};
-
-const pluginSeed: Plugin[] = [
-  {
-    id: "files.core",
-    name: "文件",
-    desc: "分片传输、版本和共享",
-    version: "0.1.0",
-    enabled: true,
-    icon: Files,
-    gradient: "linear-gradient(135deg, #fbbf24, #ea580c)",
-  },
-  {
-    id: "chat.core",
-    name: "聊天",
-    desc: "频道、线程与资源引用",
-    version: "0.1.0",
-    enabled: true,
-    icon: MessageSquare,
-    gradient: "linear-gradient(135deg, #4ade80, #16a34a)",
-  },
-  {
-    id: "code.workbench",
-    name: "代码工作台",
-    desc: "查看、编辑和运行代码",
-    version: "0.1.0",
-    enabled: true,
-    icon: Code2,
-    gradient: "linear-gradient(135deg, #818cf8, #4f46e5)",
-  },
-  {
-    id: "runner.exec",
-    name: "运行任务",
-    desc: "Runner 调度与日志流",
-    version: "0.1.0",
-    enabled: true,
-    icon: Terminal,
-    gradient: "linear-gradient(135deg, #c084fc, #9333ea)",
-  },
-];
+import { PluginFrame } from "./PluginFrame";
 
 export function PluginsApp() {
-  const { connected } = useWorkspace();
+  const { connected, lastEvent } = useWorkspace();
   const toast = useToast();
-  const [plugins, setPlugins] = useState(pluginSeed);
-  const onToggle = (id: string) => {
-    const plugin = plugins.find((item) => item.id === id);
-    if (!plugin) return;
-    const enabled = !plugin.enabled;
-    setPlugins((current) =>
-      current.map((item) => (item.id === id ? { ...item, enabled } : item)),
-    );
-    toast(`${plugin.name}已${enabled ? "启用" : "停用"}`);
+  const [plugins, setPlugins] = useState<PluginRecord[]>([]);
+  const [selected, setSelected] = useState<PluginRecord | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const refresh = () => void listPlugins().then((result) => { setPlugins(result.items); setSelected((current) => current ? result.items.find((item) => item.id === current.id) ?? null : null); }).catch(() => toast("插件列表加载失败"));
+  useEffect(() => { if (connected) refresh(); }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (lastEvent?.type === "plugin.updated") refresh(); }, [lastEvent]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const transition = async (plugin: PluginRecord, action: "enable" | "disable" | "rollback") => {
+    if (action === "enable" && !window.confirm(`启用 ${plugin.name}？\n\n权限：\n${plugin.permissions.join("\n") || "无"}`)) return;
+    try { const updated = await setPluginStatus(plugin.id, action); setPlugins((items) => items.map((item) => item.id === updated.id ? updated : item)); toast(`${plugin.name} 已${action === "enable" ? "启用" : action === "disable" ? "停用" : "回滚"}`); }
+    catch (error) { toast("插件操作失败", error instanceof Error ? error.message : "请检查权限"); }
   };
+  const onManifest = async (file: File) => {
+    try {
+      const manifest = JSON.parse(await file.text()) as PluginManifest;
+      if (!window.confirm(`安装 ${manifest.name || manifest.id}？\n\n请求权限：\n${manifest.permissions?.join("\n") || "无"}`)) return;
+      const installed = await installPlugin(manifest);
+      setPlugins((items) => [...items.filter((item) => item.id !== installed.id), installed]);
+      toast("插件已安装", installed.name);
+    } catch (error) { toast("安装失败", error instanceof Error ? error.message : "manifest 无效"); }
+  };
+
   return (
-    <div className="flex flex-col gap-4 p-4">
-      <div className="flex items-center gap-3 rounded-lg border bg-card p-4">
-        <div className="min-w-0 flex-1">
-          <p className="m-0 text-sm font-medium">插件运行时已就绪</p>
-          <p className="m-0 mt-0.5 text-xs text-muted-foreground">
-            4 个官方插件正在运行，API 版本 1.0 兼容。
-          </p>
-        </div>
-        <button
-          className="shrink-0 cursor-pointer rounded-lg border bg-transparent px-3 py-1.5 text-xs hover:bg-accent"
-          onClick={() => toast("插件开发文档已打开")}
-        >
-          开发 SDK
-        </button>
-      </div>
-      {!connected && (
-        <div
-          className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
-          role="alert"
-        >
-          网关离线，插件状态可能不是最新；当前修改仅保存在本地。
-        </div>
-      )}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {plugins.map((plugin) => {
-          const Icon = plugin.icon;
-          return (
-            <section className="rounded-lg border bg-card p-4" key={plugin.id}>
-              <div className="flex items-center gap-3">
-                <span
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-[10px] text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.35)]"
-                  style={{ background: plugin.gradient }}
-                >
-                  <Icon size={18} />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="m-0 text-sm font-medium">{plugin.name}</p>
-                  <p className="m-0 mt-0.5 truncate text-xs text-muted-foreground">
-                    {plugin.desc}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3 flex items-center justify-between border-t pt-3">
-                <span className="font-mono text-xs text-muted-foreground">
-                  {plugin.id} · v{plugin.version}
-                </span>
-                <button
-                  className={`h-5 w-9 shrink-0 cursor-pointer rounded-full border-none p-0.5 transition-colors ${
-                    plugin.enabled ? "bg-foreground" : "bg-input"
-                  }`}
-                  role="switch"
-                  aria-checked={plugin.enabled}
-                  aria-label={`启用 ${plugin.name}`}
-                  onClick={() => onToggle(plugin.id)}
-                >
-                  <span
-                    className={`block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                      plugin.enabled ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-              </div>
-            </section>
-          );
-        })}
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center gap-3 border-b px-4 py-3"><ShieldCheck size={16} /><div className="min-w-0 flex-1"><p className="m-0 text-sm font-medium">插件中心</p><p className="m-0 mt-0.5 text-xs text-muted-foreground">API 1.0 · 签名验证 · 独立沙箱</p></div><input ref={inputRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void onManifest(file); event.target.value = ""; }} /><button className="flex h-8 items-center gap-1.5 rounded-md border bg-background px-3 text-xs hover:bg-accent" onClick={() => inputRef.current?.click()}><PackagePlus size={13} />安装</button></div>
+      {!connected && <div className="border-b bg-warning/10 px-4 py-2 text-xs text-warning-foreground">网关离线，插件状态暂不可更改。</div>}
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        {plugins.length === 0 && <p className="py-8 text-center text-xs text-muted-foreground">没有已发现的插件</p>}
+        <div className="grid gap-3 sm:grid-cols-2">{plugins.map((plugin) => <section className="rounded-md border bg-card p-3" key={plugin.id}><div className="flex items-start gap-3"><span className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${plugin.health === "healthy" ? "bg-success" : "bg-warning"}`} /><div className="min-w-0 flex-1"><p className="m-0 truncate text-sm font-medium">{plugin.name}</p><p className="m-0 mt-0.5 font-mono text-[10px] text-muted-foreground">{plugin.id} · v{plugin.version}</p></div><span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{plugin.status}</span></div><div className="mt-3 flex flex-wrap gap-1">{plugin.permissions.map((permission) => <span key={permission} className="rounded border px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">{permission}</span>)}</div><div className="mt-3 flex items-center gap-1 border-t pt-2"><button className="grid h-7 w-7 place-items-center rounded-md border-none bg-transparent hover:bg-accent" title="查看沙箱" aria-label="查看沙箱" onClick={() => setSelected(plugin)}><Eye size={13} /></button><button className="grid h-7 w-7 place-items-center rounded-md border-none bg-transparent hover:bg-accent" title="回滚插件" aria-label="回滚插件" disabled={!connected} onClick={() => void transition(plugin, "rollback")}><RotateCcw size={13} /></button><button className={`ml-auto h-6 w-10 rounded-full border-none p-0.5 ${plugin.status === "enabled" ? "bg-foreground" : "bg-input"}`} role="switch" aria-checked={plugin.status === "enabled"} disabled={!connected} onClick={() => void transition(plugin, plugin.status === "enabled" ? "disable" : "enable")}><span className={`block h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${plugin.status === "enabled" ? "translate-x-4" : "translate-x-0"}`} /></button></div></section>)}</div>
+        {selected && <section className="mt-4 border-t pt-4"><div className="mb-2 flex items-center"><p className="m-0 flex-1 text-xs font-medium">{selected.name} 沙箱</p><button className="border-none bg-transparent text-xs text-muted-foreground" onClick={() => setSelected(null)}>关闭</button></div><PluginFrame plugin={selected} /></section>}
       </div>
     </div>
   );

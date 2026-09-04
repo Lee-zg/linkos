@@ -2,7 +2,7 @@
 
 局域网优先的网页办公协同工作台。文件传输、实时聊天、代码查看与运行都在一个工作区中完成，功能以插件形式扩展。
 
-> 当前版本是可运行的技术验证切片（v0.1.0）：包含工作台 UI、Gateway 发现/快照/WebSocket/任务模拟 API、插件 manifest 和 Runner 协议骨架。任意命令执行默认关闭，待沙箱实现与安全评审完成后再开启。
+> 当前版本为 LinkOS MVP（v0.1.0）：工作台 UI 已接入真实聊天、代码版本、资源元数据、设备/refresh 身份、RBAC、插件生命周期和 Runner-backed 任务 API。Runner 仅允许隔离容器执行，生产部署要求 rootless Docker/Podman、TLS 和持久化数据目录。
 
 ## 目标
 
@@ -16,7 +16,7 @@
 ### 前置条件
 
 - Node.js 20+ 与 pnpm 9+
-- Go 1.23+
+- Go 1.25+
 
 ### 启动 Gateway
 
@@ -26,6 +26,8 @@ go run .
 ```
 
 Gateway 默认监听 `http://127.0.0.1:8787`。
+
+生产 Compose、TLS、Runner engine、备份恢复和回滚流程见 [`docs/deployment.md`](docs/deployment.md)。
 
 ### 启动 Web
 
@@ -66,7 +68,7 @@ docs/                    架构、ADR 和开发计划
 
 ## 安全状态
 
-本地开发 API 默认开启 CORS 和 demo 数据，不适用于生产部署。生产模式必须配置 TLS、设备密钥、RBAC、审计持久化、真实内容寻址存储和隔离 Runner。
+本地开发 API 默认使用 demo 数据和内存后端。生产模式必须配置 `LINKOS_DATA_DIR`、TLS、设备密钥、RBAC、审计持久化、内容寻址存储、插件受信公钥和隔离 Runner。
 
 产品 PRD 与落地方案见：`docs/prd/linkos-lan-collaboration-prd.md`。
 

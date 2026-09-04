@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	protocol "github.com/Lee-zg/linkos/services/gateway/mvptypes"
 
 	_ "modernc.org/sqlite"
 )
@@ -100,6 +103,125 @@ var sqliteMigrations = [][]string{
 			directory TEXT NOT NULL,
 			resource_id TEXT NOT NULL,
 			completed_path TEXT NOT NULL
+		)`,
+	},
+	{
+		`CREATE TABLE IF NOT EXISTS mvp_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			payload TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+	},
+	{
+		`ALTER TABLE audit_entries ADD COLUMN previous_hash TEXT`,
+		`ALTER TABLE audit_entries ADD COLUMN hash TEXT`,
+	},
+	{
+		`CREATE TABLE IF NOT EXISTS auth_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			payload TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id TEXT PRIMARY KEY,
+			display_name TEXT NOT NULL,
+			role TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS memberships (
+			workspace_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (workspace_id, user_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS devices (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			workspace_id TEXT NOT NULL,
+			public_key TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL,
+			revoked_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS refresh_sessions (
+			token_hash TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			device_id TEXT,
+			expires_at TEXT NOT NULL,
+			revoked INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS mvp_messages (
+			id TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			author_id TEXT NOT NULL,
+			body TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			deleted_at TEXT
+		)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS mvp_messages_fts USING fts5(message_id UNINDEXED, channel_id UNINDEXED, author_id UNINDEXED, body)`,
+	},
+	{
+		`CREATE TABLE IF NOT EXISTS resources (
+			id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, type TEXT NOT NULL, name TEXT NOT NULL,
+			parent_id TEXT, owner_id TEXT, acl_json TEXT NOT NULL DEFAULT '{}', meta_json TEXT NOT NULL DEFAULT '{}',
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_accessed_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS resource_versions (
+			id TEXT PRIMARY KEY, resource_id TEXT NOT NULL, content_hash TEXT NOT NULL, size INTEGER NOT NULL,
+			created_by TEXT NOT NULL, created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS resource_shares (
+			token_hash TEXT PRIMARY KEY, resource_id TEXT NOT NULL, expires_at TEXT NOT NULL, single_use INTEGER NOT NULL,
+			created_by TEXT NOT NULL, created_at TEXT NOT NULL, used_at TEXT, revoked_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS chat_channels (
+			id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+			member_ids_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS message_versions (
+			id TEXT NOT NULL, version INTEGER NOT NULL, body TEXT NOT NULL, blocks_json TEXT NOT NULL DEFAULT '[]',
+			edited_at TEXT, deleted_at TEXT, actor_id TEXT NOT NULL, PRIMARY KEY (id, version)
+		)`,
+		`CREATE TABLE IF NOT EXISTS code_files (
+			id TEXT PRIMARY KEY, project_id TEXT NOT NULL, path TEXT NOT NULL, language TEXT NOT NULL,
+			size INTEGER NOT NULL, content_hash TEXT NOT NULL, version TEXT NOT NULL, updated_at TEXT NOT NULL,
+			UNIQUE(project_id, path)
+		)`,
+		`CREATE TABLE IF NOT EXISTS code_versions (
+			id TEXT PRIMARY KEY, file_id TEXT NOT NULL, version TEXT NOT NULL, content_hash TEXT NOT NULL,
+			content BLOB NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL, diff_summary_json TEXT NOT NULL DEFAULT '{}'
+		)`,
+		`CREATE TABLE IF NOT EXISTS runners (
+			id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, platform TEXT NOT NULL, version TEXT NOT NULL,
+			capabilities_json TEXT NOT NULL DEFAULT '[]', labels_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL, token_hash TEXT, revoked_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS jobs (
+			id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, project_id TEXT NOT NULL, spec_json TEXT NOT NULL,
+			status TEXT NOT NULL, runner_id TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+			started_at TEXT, ended_at TEXT, updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS job_logs (
+			job_id TEXT NOT NULL, seq INTEGER NOT NULL, level TEXT NOT NULL, chunk TEXT NOT NULL, at TEXT NOT NULL,
+			PRIMARY KEY (job_id, seq)
+		)`,
+		`CREATE TABLE IF NOT EXISTS job_artifacts (
+			id TEXT PRIMARY KEY, job_id TEXT NOT NULL, name TEXT NOT NULL, resource_id TEXT,
+			size INTEGER NOT NULL, content_hash TEXT, created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS plugins (
+			id TEXT PRIMARY KEY, version TEXT NOT NULL, api_version TEXT NOT NULL, manifest_json TEXT NOT NULL,
+			status TEXT NOT NULL, signature TEXT, permissions_json TEXT NOT NULL DEFAULT '[]', health TEXT,
+			installed_at TEXT, updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS plugin_versions (
+			plugin_id TEXT NOT NULL, version TEXT NOT NULL, manifest_json TEXT NOT NULL, signature TEXT,
+			status TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (plugin_id, version)
 		)`,
 	},
 }
@@ -223,7 +345,7 @@ func (b *sqliteBackend) updateAccessRecord(record accessRecord) error {
 
 func (b *sqliteBackend) loadAuditEntries() ([]auditEntry, int, error) {
 	rows, err := b.db.Query(`
-		SELECT id, at, actor_user_id, actor_name, action, target, detail, remote_addr, seq
+		SELECT id, at, actor_user_id, actor_name, action, target, detail, remote_addr, previous_hash, hash, seq
 		FROM audit_entries ORDER BY seq`)
 	if err != nil {
 		return nil, 0, err
@@ -234,9 +356,9 @@ func (b *sqliteBackend) loadAuditEntries() ([]auditEntry, int, error) {
 	for rows.Next() {
 		var entry auditEntry
 		var at string
-		var actorUserID, actorName, target, detail, remoteAddr sql.NullString
+		var actorUserID, actorName, target, detail, remoteAddr, previousHash, hash sql.NullString
 		var seq int
-		if err := rows.Scan(&entry.ID, &at, &actorUserID, &actorName, &entry.Action, &target, &detail, &remoteAddr, &seq); err != nil {
+		if err := rows.Scan(&entry.ID, &at, &actorUserID, &actorName, &entry.Action, &target, &detail, &remoteAddr, &previousHash, &hash, &seq); err != nil {
 			return nil, 0, err
 		}
 		entry.At = parseStoredTime(at)
@@ -245,6 +367,8 @@ func (b *sqliteBackend) loadAuditEntries() ([]auditEntry, int, error) {
 		entry.Target = target.String
 		entry.Detail = detail.String
 		entry.RemoteAddr = remoteAddr.String
+		entry.PreviousHash = previousHash.String
+		entry.Hash = hash.String
 		entries = append(entries, entry)
 		if seq > counter {
 			counter = seq
@@ -262,10 +386,10 @@ func (b *sqliteBackend) appendAuditEntry(entry auditEntry) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(`
-		INSERT INTO audit_entries (id, at, actor_user_id, actor_name, action, target, detail, remote_addr)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO audit_entries (id, at, actor_user_id, actor_name, action, target, detail, remote_addr, previous_hash, hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID, entry.At.Format(time.RFC3339), nullString(entry.ActorUserID), nullString(entry.ActorName),
-		entry.Action, nullString(entry.Target), nullString(entry.Detail), nullString(entry.RemoteAddr)); err != nil {
+		entry.Action, nullString(entry.Target), nullString(entry.Detail), nullString(entry.RemoteAddr), nullString(entry.PreviousHash), nullString(entry.Hash)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM audit_entries WHERE seq <= (SELECT MAX(seq) - ? FROM audit_entries)`, auditCapacity); err != nil {
@@ -376,6 +500,105 @@ func (b *sqliteBackend) loadUploadSessions() ([]uploadSession, error) {
 		sessions = append(sessions, session)
 	}
 	return sessions, rows.Err()
+}
+
+func (b *sqliteBackend) loadMVPState() ([]byte, error) {
+	var payload string
+	err := b.db.QueryRow(`SELECT payload FROM mvp_state WHERE id = 1`).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []byte(payload), nil
+}
+
+func (b *sqliteBackend) saveMVPState(payload []byte) error {
+	_, err := b.db.Exec(`
+		INSERT INTO mvp_state (id, payload, updated_at) VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
+		string(payload), time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (b *sqliteBackend) loadAuthState() ([]byte, error) {
+	var payload string
+	err := b.db.QueryRow(`SELECT payload FROM auth_state WHERE id = 1`).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []byte(payload), nil
+}
+
+func (b *sqliteBackend) saveAuthState(payload []byte) error {
+	_, err := b.db.Exec(`
+		INSERT INTO auth_state (id, payload, updated_at) VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
+		string(payload), time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (b *sqliteBackend) indexMVPMessage(message protocol.ChatMessage) error {
+	tx, err := b.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO mvp_messages (id, channel_id, author_id, body, created_at, deleted_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET channel_id=excluded.channel_id, author_id=excluded.author_id,
+		body=excluded.body, created_at=excluded.created_at, deleted_at=excluded.deleted_at`,
+		message.ID, message.ChannelID, message.AuthorID, message.Body, message.CreatedAt, nullString(message.DeletedAt)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM mvp_messages_fts WHERE message_id = ?`, message.ID); err != nil {
+		return err
+	}
+	if message.DeletedAt == "" {
+		if _, err := tx.Exec(`INSERT INTO mvp_messages_fts (message_id, channel_id, author_id, body) VALUES (?, ?, ?, ?)`, message.ID, message.ChannelID, message.AuthorID, message.Body); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (b *sqliteBackend) removeMVPMessage(id string) error {
+	if _, err := b.db.Exec(`DELETE FROM mvp_messages_fts WHERE message_id = ?`, id); err != nil {
+		return err
+	}
+	_, err := b.db.Exec(`DELETE FROM mvp_messages WHERE id = ?`, id)
+	return err
+}
+
+func (b *sqliteBackend) searchMVPMessage(query string) ([]string, error) {
+	terms := make([]string, 0)
+	for _, term := range strings.Fields(query) {
+		term = strings.ReplaceAll(term, `"`, `""`)
+		if term != "" {
+			terms = append(terms, `"`+term+`"*`)
+		}
+	}
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	rows, err := b.db.Query(`SELECT message_id FROM mvp_messages_fts WHERE mvp_messages_fts MATCH ?`, strings.Join(terms, " AND "))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (b *sqliteBackend) backupTo(dir string) (backupManifest, error) {

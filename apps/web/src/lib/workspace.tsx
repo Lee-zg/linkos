@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import type { JobSpec, JobStatus } from "@linkos/protocol";
-import { sendMessage as postMessage, submitJob } from "./api";
+import { getJob, listMessages, sendMessage as postMessage, submitJob } from "./api";
 import { useWorkspaceSocket, type SocketEvent } from "./useWorkspaceSocket";
 
 export type Message = {
@@ -20,30 +20,6 @@ export type Message = {
   time: string;
   own?: boolean;
 };
-
-const initialMessages: Message[] = [
-  {
-    id: "m1",
-    author: "林墨",
-    initials: "LM",
-    body: "Gateway 的重连补发已经接通了，大家可以直接在任务面板里看事件序号。",
-    time: "09:41",
-  },
-  {
-    id: "m2",
-    author: "周予",
-    initials: "ZY",
-    body: "收到。我把大文件上传切到分片模式，今晚压一下 1GB 的构建包。",
-    time: "09:43",
-  },
-  {
-    id: "m3",
-    author: "陈一",
-    initials: "CY",
-    body: "好的，发布频道先保留在工作区内，Runner 02 的网络策略还是 deny。",
-    time: "09:46",
-  },
-];
 
 const jobStatuses = new Set<JobStatus>([
   "queued",
@@ -64,27 +40,21 @@ type Workspace = {
   lastSeq: number;
   lastEvent: SocketEvent | null;
   messages: Message[];
-  sendMessage: (body: string) => void;
+  sendMessage: (body: string, channelId?: string, threadId?: string) => void;
   jobStatus: JobStatus;
-  runTask: () => Promise<void>;
+  currentJobId: string | null;
+  runTask: (spec?: Partial<JobSpec>) => Promise<string | null>;
 };
 
 const WorkspaceContext = createContext<Workspace | null>(null);
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const [messages, setMessages] = useState(initialMessages);
-  const [jobStatus, setJobStatus] = useState<JobStatus>("succeeded");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [jobStatus, setJobStatus] = useState<JobStatus>("queued");
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [lastEvent, setLastEvent] = useState<SocketEvent | null>(null);
-  const jobTimers = useRef<number[]>([]);
   const localMessageIds = useRef(new Set<string>());
   const messageCounter = useRef(0);
-
-  useEffect(() => {
-    return () => {
-      jobTimers.current.forEach((timer) => window.clearTimeout(timer));
-      jobTimers.current = [];
-    };
-  }, []);
 
   const onSocketEvent = useCallback((event: SocketEvent) => {
     setLastEvent(event);
@@ -119,7 +89,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       });
     }
     if (event.type === "job.status.changed") {
-      const payload = event.payload as { status?: unknown };
+      const payload = event.payload as { id?: string; jobId?: string; status?: unknown };
       if (
         payload &&
         typeof payload === "object" &&
@@ -132,7 +102,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const { connected, lastSeq } = useWorkspaceSocket({ onEvent: onSocketEvent });
 
-  const sendMessage = useCallback((body: string) => {
+  useEffect(() => {
+    if (!connected) return;
+    void listMessages({ channelId: "engineering", limit: 100 }).then((result) => {
+      setMessages(result.items.map((message) => ({ id: message.id, author: message.authorName, initials: message.authorName.slice(0, 1), body: message.body, time: new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) })));
+    }).catch(() => undefined);
+  }, [connected]);
+
+  useEffect(() => {
+    if (!currentJobId || !["queued", "preparing", "running"].includes(jobStatus)) return;
+    const timer = window.setInterval(() => { void getJob(currentJobId).then((job) => setJobStatus(job.status)).catch(() => undefined); }, 500);
+    return () => window.clearInterval(timer);
+  }, [currentJobId, jobStatus]);
+
+  const sendMessage = useCallback((body: string, channelId = "engineering", threadId?: string) => {
     const clientMsgId = `local-${Date.now()}-${messageCounter.current++}`;
     localMessageIds.current.add(clientMsgId);
     if (localMessageIds.current.size > 100) {
@@ -150,33 +133,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         own: true,
       },
     ]);
-    void postMessage({ body, channelId: "engineering", clientMsgId }).catch(
+    void postMessage({ body, channelId, threadId, clientMsgId }).catch(
       () => undefined,
     );
   }, []);
 
-  const runTask = useCallback(async () => {
-    jobTimers.current.forEach((timer) => window.clearTimeout(timer));
-    jobTimers.current = [];
+  const runTask = useCallback(async (overrides: Partial<JobSpec> = {}) => {
     setJobStatus("preparing");
     const spec: JobSpec = {
-      projectId: "api-gateway",
+      projectId: "project_gateway",
       command: "go test ./...",
       timeoutSeconds: 600,
       memoryMb: 512,
       network: "deny",
+      ...overrides,
     };
     try {
-      await submitJob(spec);
-      setJobStatus("preparing");
+      const job = await submitJob(spec);
+      setCurrentJobId(job.id);
+      setJobStatus(job.status);
+      return job.id;
     } catch {
-      setJobStatus("queued");
-      return;
+      setJobStatus("failed");
+      return null;
     }
-    jobTimers.current = [
-      window.setTimeout(() => setJobStatus("running"), 650),
-      window.setTimeout(() => setJobStatus("succeeded"), 2600),
-    ];
   }, []);
 
   const value = useMemo(
@@ -187,12 +167,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       messages,
       sendMessage,
       jobStatus,
+      currentJobId,
       runTask,
     }),
-    [connected, lastSeq, lastEvent, messages, sendMessage, jobStatus, runTask],
+    [connected, lastSeq, lastEvent, messages, sendMessage, jobStatus, currentJobId, runTask],
   );
   return (
-    <WorkspaceContext.Provider value={value}>
+      <WorkspaceContext.Provider value={value}>
       {children}
     </WorkspaceContext.Provider>
   );

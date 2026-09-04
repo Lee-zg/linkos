@@ -6,11 +6,17 @@ import type {
 } from "@linkos/protocol";
 import {
   approveAccessRecord,
+  createInvite,
   fetchPolicy,
   listAccessRecords,
   listAuditEntries,
+  listDevices,
+  listMembers,
+  listRunners,
   rejectAccessRecord,
+  revokeDevice,
   updateAccessPolicy,
+  updateMemberRole,
 } from "../lib/api";
 import { useSession } from "../lib/session";
 import { useWorkspace } from "../lib/workspace";
@@ -93,17 +99,27 @@ export function AdminApp() {
   const [error, setError] = useState<string | null>(null);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [members, setMembers] = useState<Array<{ userId: string; displayName: string; role: string; status: string; deviceCount: number }>>([]);
+  const [devices, setDevices] = useState<Array<Record<string, unknown>>>([]);
+  const [runners, setRunners] = useState<Array<{ id: string; status: string; platform: string; lastSeenAt: string }>>([]);
+  const [invite, setInvite] = useState<{ code: string; expiresAt: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [policyResult, recordsResult, auditResult] = await Promise.all([
+      const [policyResult, recordsResult, auditResult, memberResult, deviceResult, runnerResult] = await Promise.all([
         fetchPolicy(),
         listAccessRecords(),
         listAuditEntries(),
+        listMembers(),
+        listDevices(),
+        listRunners(),
       ]);
       setPolicy(policyResult);
       setRecords(recordsResult.items ?? []);
       setAuditEntries(auditResult.items ?? []);
+      setMembers(memberResult.items ?? []);
+      setDevices(deviceResult.items ?? []);
+      setRunners(runnerResult.items ?? []);
       setError(null);
     } catch {
       setError("管理数据加载失败，请检查网关连接与登录状态。");
@@ -111,7 +127,7 @@ export function AdminApp() {
   }, []);
 
   useEffect(() => {
-    if (profile.role !== "admin") return;
+    if (profile.role !== "admin" && profile.role !== "owner") return;
     void refresh();
     const timer = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
@@ -122,7 +138,7 @@ export function AdminApp() {
     void refresh();
   }, [lastEvent, refresh]);
 
-  if (profile.role !== "admin") {
+  if (profile.role !== "admin" && profile.role !== "owner") {
     return (
       <div className="p-6 text-sm text-muted-foreground">
         管理后台仅对管理员开放。
@@ -169,6 +185,15 @@ export function AdminApp() {
   };
 
   const pendingCount = records.filter((r) => r.status === "pending").length;
+
+  const changeRole = async (userId: string, role: string) => {
+    try { await updateMemberRole(userId, role); setMembers((items) => items.map((item) => item.userId === userId ? { ...item, role } : item)); toast("成员角色已更新"); }
+    catch (error) { toast("角色更新失败", error instanceof Error ? error.message : "请重试"); }
+  };
+  const issueInvite = async () => {
+    try { const created = await createInvite(); setInvite(created); }
+    catch { toast("邀请码创建失败"); }
+  };
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
@@ -296,6 +321,18 @@ export function AdminApp() {
             );
           })}
         </div>
+      </section>
+
+      <section className="rounded-lg border bg-card px-4 py-3">
+        <div className="flex items-center"><h3 className="m-0 flex-1 text-sm font-semibold">成员与设备</h3><button className="rounded-md border bg-background px-2.5 py-1.5 text-xs hover:bg-accent" onClick={() => void issueInvite()}>生成邀请码</button></div>
+        {invite && <p className="my-2 rounded-md bg-muted px-3 py-2 font-mono text-xs">{invite.code}<span className="ml-2 font-sans text-muted-foreground">有效至 {formatTime(invite.expiresAt)}</span></p>}
+        <div className="mt-2 divide-y">{members.map((member) => <div key={member.userId} className="flex items-center gap-3 py-2"><div className="min-w-0 flex-1"><p className="m-0 truncate text-xs font-medium">{member.displayName}</p><p className="m-0 mt-0.5 font-mono text-[10px] text-muted-foreground">{member.userId} · {member.deviceCount} devices</p></div><select aria-label={`设置 ${member.displayName} 的角色`} value={member.role} className="h-7 rounded-md border bg-background px-2 text-xs" onChange={(event) => void changeRole(member.userId, event.target.value)}><option value="guest">guest</option><option value="member">member</option><option value="admin">admin</option>{profile.role === "owner" && <option value="owner">owner</option>}</select></div>)}</div>
+        <div className="mt-2 border-t pt-2">{devices.map((device) => { const id = String(device.id ?? ""); const revoked = Boolean(device.revokedAt); return <div key={id} className="flex items-center gap-3 py-1.5"><span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">{String(device.displayName ?? id)}</span><span className="text-[10px] text-muted-foreground">{revoked ? "已吊销" : "活跃"}</span>{!revoked && <button className="rounded-md border bg-background px-2 py-1 text-[10px] hover:bg-accent" onClick={() => void revokeDevice(id).then(() => refresh())}>吊销</button>}</div>; })}</div>
+      </section>
+
+      <section className="rounded-lg border bg-card px-4 py-3">
+        <h3 className="m-0 text-sm font-semibold">Runner</h3>
+        <div className="mt-2 divide-y">{runners.map((runner) => <div key={runner.id} className="flex items-center gap-3 py-2 text-xs"><span className={`h-2 w-2 rounded-full ${runner.status === "online" ? "bg-success" : "bg-muted-foreground"}`} /><span className="min-w-0 flex-1 font-mono">{runner.id}</span><span className="text-muted-foreground">{runner.platform}</span><span className="w-14 text-right">{runner.status}</span></div>)}</div>
       </section>
 
       <section className="rounded-lg border bg-card px-4 py-2">

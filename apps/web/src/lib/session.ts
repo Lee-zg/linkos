@@ -2,6 +2,7 @@ import { createContext, useContext } from "react";
 import type { SessionProfile } from "@linkos/protocol";
 
 const TOKEN_KEY = "linkos.access_token";
+const REFRESH_KEY = "linkos.refresh_token";
 const PROFILE_KEY = "linkos.access_profile";
 
 export function loadToken(): string | null {
@@ -10,6 +11,10 @@ export function loadToken(): string | null {
   } catch {
     return null;
   }
+}
+
+export function loadRefreshToken(): string | null {
+  try { return window.localStorage.getItem(REFRESH_KEY); } catch { return null; }
 }
 
 export function loadProfile(): SessionProfile | null {
@@ -21,9 +26,10 @@ export function loadProfile(): SessionProfile | null {
   }
 }
 
-export function saveSession(token: string, profile: SessionProfile): void {
+export function saveSession(token: string, profile: SessionProfile, refreshToken?: string): void {
   try {
     window.localStorage.setItem(TOKEN_KEY, token);
+    if (refreshToken) window.localStorage.setItem(REFRESH_KEY, refreshToken);
     window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
   } catch {
     // Storage unavailable — the session stays in memory for this tab.
@@ -33,6 +39,7 @@ export function saveSession(token: string, profile: SessionProfile): void {
 export function clearSession(): void {
   try {
     window.localStorage.removeItem(TOKEN_KEY);
+    window.localStorage.removeItem(REFRESH_KEY);
     window.localStorage.removeItem(PROFILE_KEY);
   } catch {
     // ignore storage failures on cleanup

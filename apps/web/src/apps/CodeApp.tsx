@@ -1,164 +1,124 @@
-import {
-  ChevronDown,
-  Copy,
-  FileCode2,
-  Folder,
-  GitBranch,
-  Play,
-  RefreshCw,
-} from "lucide-react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { CodeConflict, CodeFile } from "@linkos/protocol";
+import { AlertTriangle, Copy, FileCode2, Folder, Play, RefreshCw, Save } from "lucide-react";
+import { ApiError, getCodeFile, listCodeFiles, saveCodeFile, saveCodeFileAs } from "../lib/api";
+import { useSession } from "../lib/session";
 import { useWorkspace } from "../lib/workspace";
 import { useToast } from "../os/Toaster";
+import { CodeEditor } from "./CodeEditor";
 
-const codeLines: Array<[string, string]> = [
-  ["1", "package gateway"],
-  ["2", ""],
-  ["3", "import ("],
-  ["4", '  "context"'],
-  ["5", '  "log"'],
-  ["6", '  "net/http"'],
-  ["7", ")"],
-  ["8", ""],
-  ["9", "func (h *Hub) Broadcast(ctx context.Context, event Event) error {"],
-  ["10", "  if err := h.store.Append(ctx, event); err != nil {"],
-  ["11", "    return err"],
-  ["12", "  }"],
-  ["13", "  for client := range h.clients {"],
-  ["14", "    client.Send(event)"],
-  ["15", "  }"],
-  ["16", "  return nil"],
-  ["17", "}"],
-];
-
-function TreeRow({
-  icon,
-  label,
-  active,
-  depth = 0,
-}: {
-  icon: ReactNode;
-  label: string;
-  active?: boolean;
-  depth?: number;
-}) {
-  return (
-    <button
-      className={`flex w-full cursor-pointer items-center gap-2 rounded-md border-none px-2 py-1.5 text-left font-mono text-xs ${
-        active
-          ? "bg-accent font-medium"
-          : "bg-transparent text-muted-foreground hover:bg-accent/60"
-      }`}
-      style={{ paddingLeft: 8 + depth * 14 }}
-      aria-current={active ? "page" : undefined}
-    >
-      <span className="shrink-0 text-foreground/50">{icon}</span>
-      {label}
-    </button>
-  );
-}
+const DRAFT_PREFIX = "linkos.code.draft.";
 
 export function CodeApp() {
   const { connected, jobStatus, runTask } = useWorkspace();
+  const { profile } = useSession();
   const toast = useToast();
-  const running = jobStatus === "running" || jobStatus === "preparing";
-  const onRun = () => {
-    toast("任务已进入 Runner 队列", "go test ./... · Runner 02");
-    void runTask();
+  const [files, setFiles] = useState<CodeFile[]>([]);
+  const [file, setFile] = useState<CodeFile | null>(null);
+  const [content, setContent] = useState("");
+  const [baseVersion, setBaseVersion] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState<CodeConflict | null>(null);
+  const running = jobStatus === "running" || jobStatus === "preparing" || jobStatus === "queued";
+  const readOnly = !connected || (file?.size ?? 0) > 5 * 1024 * 1024;
+
+  const openFile = useCallback(async (next: CodeFile) => {
+    setLoading(true);
+    setConflict(null);
+    try {
+      const loaded = await getCodeFile(next.id);
+      const draftKey = `${DRAFT_PREFIX}${next.id}.${loaded.file.version}`;
+      const draft = window.localStorage.getItem(draftKey);
+      setFile(loaded.file);
+      setBaseVersion(loaded.file.version);
+      setContent(draft ?? loaded.content);
+      setDirty(draft !== null && draft !== loaded.content);
+    } catch {
+      toast("代码加载失败", "请检查权限和网关连接。");
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (!connected) { setLoading(false); return; }
+    void listCodeFiles().then((result) => {
+      setFiles(result.items);
+      if (result.items[0]) return openFile(result.items[0]);
+      setLoading(false);
+    }).catch(() => { setLoading(false); toast("代码目录加载失败"); });
+  }, [connected, openFile, toast]);
+
+  useEffect(() => {
+    if (!file || !dirty) return;
+    const timer = window.setTimeout(() => {
+      try { window.localStorage.setItem(`${DRAFT_PREFIX}${file.id}.${baseVersion}`, content); } catch { /* draft remains in memory */ }
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [baseVersion, content, dirty, file]);
+
+  const acceptVersion = (version: string) => {
+    if (file) {
+      try { window.localStorage.removeItem(`${DRAFT_PREFIX}${file.id}.${baseVersion}`); } catch { /* ignore */ }
+      setFile({ ...file, version, size: new Blob([content]).size });
+    }
+    setBaseVersion(version);
+    setDirty(false);
+    setConflict(null);
   };
+
+  const save = async (force = false) => {
+    if (!file || !dirty || readOnly) return;
+    setSaving(true);
+    try {
+      const version = await saveCodeFile(file.id, content, baseVersion, force);
+      acceptVersion(version.version);
+      toast("已保存", `版本 ${version.version}`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) setConflict(error.details as unknown as CodeConflict);
+      else toast("保存失败", error instanceof Error ? error.message : "请检查权限和连接。");
+    } finally { setSaving(false); }
+  };
+
+  const saveAs = async () => {
+    if (!file) return;
+    const path = window.prompt("另存为项目内路径", file.path.replace(/(\.[^/.]+)?$/, "-copy$1"));
+    if (!path?.trim()) return;
+    try {
+      const result = await saveCodeFileAs({ projectId: file.projectId, path: path.trim(), language: file.language, content });
+      setFiles((current) => [...current, result.file]);
+      await openFile(result.file);
+      toast("已另存为", result.file.path);
+    } catch (error) { toast("另存失败", error instanceof Error ? error.message : "路径不可用"); }
+  };
+
+  const lineCount = useMemo(() => content.split("\n").length, [content]);
+
   return (
-    <div className="flex h-full">
-      <aside className="hidden w-48 shrink-0 flex-col border-r bg-muted/30 sm:flex">
-        <div className="px-3 pt-3 pb-2">
-          <p className="m-0 text-sm font-semibold">api-gateway</p>
-          <button className="mt-2 flex w-full cursor-pointer items-center gap-2 rounded-md border bg-background px-2 py-1.5 font-mono text-xs text-muted-foreground">
-            <GitBranch size={12} />
-            main
-            <ChevronDown size={12} className="ml-auto" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-auto px-2">
-          <TreeRow icon={<Folder size={13} />} label="cmd" />
-          <TreeRow icon={<Folder size={13} />} label="internal" />
-          <TreeRow icon={<Folder size={13} />} label="events" depth={1} />
-          <TreeRow icon={<FileCode2 size={13} />} label="hub.go" depth={1} />
-          <TreeRow
-            icon={<FileCode2 size={13} />}
-            label="websocket.go"
-            depth={1}
-            active
-          />
-          <TreeRow icon={<Folder size={13} />} label="storage" />
-          <TreeRow icon={<FileCode2 size={13} />} label="go.mod" />
-          <TreeRow icon={<FileCode2 size={13} />} label="README.md" />
-        </div>
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground">
-          main · 已同步 3 分钟前
+    <div className="flex h-full min-h-0">
+      <aside className="hidden w-52 shrink-0 flex-col border-r bg-muted/30 sm:flex">
+        <div className="border-b px-3 py-3"><p className="m-0 text-sm font-semibold">api-gateway</p><p className="m-0 mt-1 font-mono text-[10px] text-muted-foreground">project_gateway · {files.length} files</p></div>
+        <div className="min-h-0 flex-1 overflow-auto p-2">
+          <div className="mb-1 flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground"><Folder size={13} /> source</div>
+          {files.map((item) => <button key={item.id} onClick={() => void openFile(item)} className={`flex w-full items-center gap-2 rounded-md border-none px-2 py-1.5 text-left font-mono text-xs ${file?.id === item.id ? "bg-accent font-medium" : "bg-transparent text-muted-foreground hover:bg-accent/60"}`}><FileCode2 size={13} className="shrink-0" /><span className="truncate">{item.path}</span></button>)}
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-10 items-center gap-2 border-b px-3">
-          <span className="flex items-center gap-1.5 border-b-2 border-foreground px-1 font-mono text-xs leading-[38px]">
-            <FileCode2 size={13} className="text-foreground/60" />
-            websocket.go
-          </span>
-          <div className="ml-auto flex items-center gap-1">
-            <button
-              className="grid h-7 w-7 cursor-pointer place-items-center rounded-md border-none bg-transparent text-muted-foreground hover:bg-accent"
-              aria-label="复制代码"
-              onClick={() => toast("代码已复制到剪贴板")}
-            >
-              <Copy size={14} />
-            </button>
-            <button
-              className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border-none bg-primary px-2.5 text-xs text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={onRun}
-              disabled={!connected || running}
-              aria-label={running ? "运行测试中" : "运行测试"}
-            >
-              {running ? (
-                <RefreshCw size={13} className="animate-spin" />
-              ) : (
-                <Play size={13} />
-              )}
-              {running ? "运行中..." : "运行测试"}
-            </button>
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+          <span className="min-w-0 truncate font-mono text-xs"><FileCode2 size={13} className="mr-1.5 inline" />{file?.path ?? "未选择文件"}</span>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <button className="grid h-7 w-7 place-items-center rounded-md border-none bg-transparent text-muted-foreground hover:bg-accent" title="复制代码" aria-label="复制代码" onClick={() => void navigator.clipboard.writeText(content).then(() => toast("代码已复制"))}><Copy size={14} /></button>
+            <button className="grid h-7 w-7 place-items-center rounded-md border-none bg-transparent text-muted-foreground hover:bg-accent disabled:opacity-40" title="保存" aria-label="保存" disabled={!dirty || saving || readOnly} onClick={() => void save()}><Save size={14} /></button>
+            <button className="flex h-7 items-center gap-1.5 rounded-md border-none bg-primary px-2.5 text-xs text-primary-foreground disabled:opacity-40" onClick={() => void runTask()} disabled={!connected || running}><Play size={13} />运行</button>
           </div>
         </div>
-        <div className="flex items-center gap-4 border-b px-4 py-1.5 font-mono text-[11px] text-muted-foreground">
-          <span>未提交修改</span>
-          <span>UTF-8</span>
-          <span>Go</span>
-          <span className="ml-auto">Ln 9, Col 4</span>
-        </div>
-        {!connected && (
-          <div
-            className="border-b bg-warning/10 px-4 py-2 text-xs text-warning-foreground"
-            role="alert"
-          >
-            网关离线，代码保持只读；连接恢复后可继续运行任务。
-          </div>
-        )}
-        <div className="min-h-0 flex-1 overflow-auto bg-muted/20 py-2 font-mono text-xs leading-6">
-          {codeLines.map(([line, text], index) => (
-            <div
-              className={`grid grid-cols-[44px_1fr] pr-3 ${
-                index === 8 ? "bg-accent" : ""
-              }`}
-              key={line}
-            >
-              <span className="pr-3 text-right text-foreground/30 select-none">
-                {line}
-              </span>
-              <code className="whitespace-pre text-foreground/80">{text}</code>
-            </div>
-          ))}
-        </div>
-        <div className="flex items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
-          <span>只读预览</span>
-          <span>2.4 KB</span>
-          <span className="ml-auto font-mono">+8 -2</span>
-        </div>
+        {conflict && <div className="flex flex-wrap items-center gap-2 border-b border-warning/40 bg-warning/10 px-3 py-2 text-xs" role="alert"><AlertTriangle size={14} className="text-warning-foreground" /><span className="min-w-0 flex-1">服务器版本为 {conflict.current?.version}，当前草稿基于 {conflict.baseVersion}。</span><button className="rounded-md border bg-background px-2 py-1" onClick={() => file && void openFile(file)}>加载服务器版本</button><button className="rounded-md border bg-background px-2 py-1" onClick={() => void saveAs()}>另存为</button>{(profile.role === "admin" || profile.role === "owner") && <button className="rounded-md bg-destructive px-2 py-1 text-destructive-foreground" onClick={() => { if (window.confirm("覆盖服务器当前版本？此操作会创建新的审计版本。")) void save(true); }}>覆盖保存</button>}</div>}
+        {!connected && <div className="border-b bg-warning/10 px-4 py-2 text-xs text-warning-foreground">网关离线，草稿仍会保存在本机。</div>}
+        <div className="flex items-center gap-4 border-b px-3 py-1.5 font-mono text-[10px] text-muted-foreground"><span>{dirty ? "草稿已自动保存" : `已同步 ${baseVersion || "-"}`}</span><span>{file?.language || "text"}</span><span className="ml-auto">{lineCount} lines</span></div>
+        <div className="min-h-0 flex-1 bg-muted/20">{loading ? <p className="p-4 text-xs text-muted-foreground">加载代码...</p> : file ? <CodeEditor value={content} language={file.language} readOnly={readOnly} onChange={(next) => { setContent(next); setDirty(true); }} /> : <p className="p-4 text-xs text-muted-foreground">项目中没有代码文件。</p>}</div>
+        <div className="flex shrink-0 items-center gap-3 border-t px-3 py-2 text-[10px] text-muted-foreground"><span>{readOnly ? "只读" : "可编辑"}</span><span>{file ? `${Math.max(1, Math.round(file.size / 1024))} KB` : "-"}</span><span className="ml-auto">UTF-8</span>{saving && <RefreshCw size={11} className="animate-spin" />}</div>
       </div>
     </div>
   );

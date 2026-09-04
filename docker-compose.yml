@@ -6,17 +6,48 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - gateway
+      gateway:
+        condition: service_healthy
     restart: unless-stopped
   gateway:
     build:
       context: ./services/gateway
     ports:
       - "8787:8787"
+    environment:
+      LINKOS_ENV: production
+      LINKOS_DATA_DIR: /var/lib/linkos
+      LINKOS_UPLOAD_DIR: /var/lib/linkos/uploads
+      LINKOS_ADMIN_PASSCODE: ${LINKOS_ADMIN_PASSCODE:?LINKOS_ADMIN_PASSCODE is required}
+      LINKOS_ALLOWED_ORIGINS: ${LINKOS_ALLOWED_ORIGINS:-http://localhost:8080}
+      LINKOS_RUNNER_URL: ${LINKOS_RUNNER_URL:-}
+      LINKOS_RUNNER_REGISTRATION_TOKEN: ${LINKOS_RUNNER_REGISTRATION_TOKEN:-}
+      LINKOS_PLUGIN_DIR: /opt/linkos/plugins
+      LINKOS_PLUGIN_TRUSTED_KEYS: ${LINKOS_PLUGIN_TRUSTED_KEYS:-}
+    volumes:
+      - gateway-data:/var/lib/linkos
+      - ./plugins:/opt/linkos/plugins:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/api/v1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
   runner:
     build:
       context: ./services/runner
     ports:
       - "9797:9797"
+    profiles: ["runner-protocol"]
+    environment:
+      LINKOS_ENV: production
+      LINKOS_RUNNER_ID: runner-compose
+      LINKOS_RUNNER_IMAGE: ${LINKOS_RUNNER_IMAGE:-golang:1.23-alpine}
+      LINKOS_RUNNER_REGISTRATION_TOKEN: ${LINKOS_RUNNER_REGISTRATION_TOKEN:-}
+      DOCKER_HOST: ${LINKOS_RUNNER_ENGINE_HOST:-}
+      DOCKER_TLS_VERIFY: ${LINKOS_RUNNER_ENGINE_TLS_VERIFY:-}
+      DOCKER_CERT_PATH: ${LINKOS_RUNNER_ENGINE_CERT_PATH:-}
     restart: unless-stopped
+
+volumes:
+  gateway-data:

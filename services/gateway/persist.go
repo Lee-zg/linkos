@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	protocol "github.com/Lee-zg/linkos/services/gateway/mvptypes"
 )
 
 // persistBackend is the storage seam for R-02. In-memory stores stay the
@@ -28,6 +30,23 @@ type persistBackend interface {
 	saveUploadSession(uploadSession) error
 	backupTo(dir string) (backupManifest, error)
 	Close() error
+}
+
+// authStateBackend stores the durable portion of local identity. Access
+// bearer sessions intentionally remain in memory, while refresh sessions,
+// devices and invite consumption survive a gateway restart.
+type authStateBackend interface {
+	loadAuthState() ([]byte, error)
+	saveAuthState([]byte) error
+}
+
+// mvpFTSBackend is implemented by SQLite. The memory backend keeps the
+// existing request-path behavior, while durable deployments maintain a real
+// FTS5 index for message search.
+type mvpFTSBackend interface {
+	indexMVPMessage(protocol.ChatMessage) error
+	removeMVPMessage(string) error
+	searchMVPMessage(string) ([]string, error)
 }
 
 // backupManifest describes one durable snapshot produced by backupTo.
@@ -63,7 +82,14 @@ func (memoryBackend) appendEvent(event) error           { return nil }
 func (memoryBackend) loadUploadSessions() ([]uploadSession, error) {
 	return nil, nil
 }
-func (memoryBackend) saveUploadSession(uploadSession) error { return nil }
+func (memoryBackend) saveUploadSession(uploadSession) error      { return nil }
+func (memoryBackend) loadMVPState() ([]byte, error)              { return nil, nil }
+func (memoryBackend) saveMVPState([]byte) error                  { return nil }
+func (memoryBackend) loadAuthState() ([]byte, error)             { return nil, nil }
+func (memoryBackend) saveAuthState([]byte) error                 { return nil }
+func (memoryBackend) indexMVPMessage(protocol.ChatMessage) error { return nil }
+func (memoryBackend) removeMVPMessage(string) error              { return nil }
+func (memoryBackend) searchMVPMessage(string) ([]string, error)  { return nil, nil }
 func (memoryBackend) backupTo(string) (backupManifest, error) {
 	return backupManifest{}, errors.New("memory backend has no durable state to back up")
 }
@@ -75,6 +101,9 @@ func (memoryBackend) Close() error { return nil }
 func openBackend() persistBackend {
 	dir := strings.TrimSpace(os.Getenv("LINKOS_DATA_DIR"))
 	if dir == "" {
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("LINKOS_ENV")), "production") {
+			log.Fatal("LINKOS_DATA_DIR is required when LINKOS_ENV=production")
+		}
 		log.Printf("gateway storage: memory (set LINKOS_DATA_DIR to persist access state)")
 		return memoryBackend{}
 	}

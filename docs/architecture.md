@@ -12,10 +12,12 @@ Gateway :8787  ----  Runner :9797 (安全协议 stub)
        +-- protocol events + bounded replay
        +-- demo resources
        +-- upload session/part PoC
-       +-- job state simulation
+       +-- Runner-backed job state, logs and artifact metadata
+       +-- RBAC, device/refresh identity, audit hash chain
+       +-- resource metadata, ACL and single-use share links
 ```
 
-当前 Gateway 仍为开发模式：使用内存短期会话、demo 资源和本地上传目录。访问策略、审批记录、审计日志、WS 事件与上传会话元数据已通过 `persistBackend` 存储接口落地 SQLite 后端：设置 `LINKOS_DATA_DIR` 后持久化到 `<dir>/gateway.db`（版本化迁移、重启恢复、跨重启 `last_event_seq` 重放、上传会话跨重启续传，上传数据目录由 `LINKOS_UPLOAD_DIR` 固定以便恢复），未设置时保持内存默认；鉴权会话按设计为易失态。离线运维命令 `gateway backup` 用 `VACUUM INTO` 在 `<dir>/backups` 生成一致性快照（清单含大小/SHA-256/schema 版本），`gateway restore <file>` 校验完整性与 schema 后原子替换数据库。已完成事件序号、1,000 条有界历史、`last_event_seq` 补发和超窗口快照提示的 PoC；已完成上传会话、分片 SHA-256 校验、乱序/断点恢复和完整文件校验的 PoC；已接入开发态随机 Bearer 会话和工作区路由统一鉴权。下一步接入设备身份/RBAC、内容寻址文件存储、Range 下载和事件快照恢复；Runner 在 Linux 上使用 rootless container/WASI 进行隔离执行。
+Gateway 在开发模式下可使用内存后端；生产模式强制 `LINKOS_DATA_DIR` 和管理员口令。SQLite 版本化迁移持久化访问策略、设备/refresh 状态、成员关系、审计哈希链、WS 事件、上传会话和 MVP 状态 blob；事件和上传保持原有 retention/schema。MVP 状态同时维护资源元数据/ACL/分享链接、频道/消息 FTS、代码版本、Runner/job/log/artifact 元数据和插件生命周期。生产 Runner 通过 HTTPS + registration token 连接独立 rootless Docker/Podman engine，容器不可用时不会回退宿主执行。完整变量、Compose profile、备份恢复和回滚步骤见 [`deployment.md`](deployment.md)。
 
 上传 PoC 路径：
 

@@ -6,6 +6,8 @@ import {
   dropSession,
   fetchMe,
   fetchPolicy,
+  getGatewayBase,
+  setGatewayBase,
 } from "../lib/api";
 import { refreshProfile } from "../lib/session";
 
@@ -40,6 +42,8 @@ export function AccessGate({
   const [displayName, setDisplayName] = useState("");
   const [passcode, setPasscode] = useState("");
   const [note, setNote] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [gatewayAddress, setGatewayAddress] = useState(() => getGatewayBase() || "http://127.0.0.1:8787");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pollTimer = useRef<number | undefined>(undefined);
@@ -143,6 +147,7 @@ export function AccessGate({
         accessType: "login",
         displayName: displayName.trim(),
         passcode: passcode.trim() || undefined,
+        inviteCode: inviteCode.trim() || undefined,
       });
       stopPolling();
       onEnter(profileFromSession(session));
@@ -205,11 +210,12 @@ export function AccessGate({
             <div className="flex flex-col gap-3 py-4">
               <p className="m-0 text-sm">无法连接网关服务。</p>
               <p className="m-0 text-xs text-muted-foreground">
-                请确认 LinkOS Gateway 已启动（127.0.0.1:8787），然后重试。
+                输入已发现的局域网 Gateway 地址，或使用本机默认地址。
               </p>
+              <input className="rounded-lg border bg-background px-3 py-2 text-sm outline-none" value={gatewayAddress} onChange={(event) => setGatewayAddress(event.target.value)} aria-label="Gateway 地址" placeholder="http://host:8787" />
               <button
                 className="cursor-pointer rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background hover:opacity-90"
-                onClick={() => void showGate()}
+                onClick={() => { try { setGatewayBase(gatewayAddress); void showGate(); } catch (error) { setError(error instanceof Error ? error.message : "网关地址无效"); } }}
               >
                 重试
               </button>
@@ -263,6 +269,10 @@ export function AccessGate({
                     placeholder="你的名字"
                     onChange={(event) => setDisplayName(event.target.value)}
                   />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  邀请码（可选）
+                  <input className="rounded-lg border bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-ring" value={inviteCode} placeholder="10 分钟单次邀请码" onChange={(event) => setInviteCode(event.target.value)} />
                 </label>
                 <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                   口令（可选）
