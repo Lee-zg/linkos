@@ -14,6 +14,7 @@ type WindowAction =
   | { type: "CLOSE"; id: string }
   | { type: "FOCUS"; id: string }
   | { type: "MINIMIZE"; id: string }
+  | { type: "MINIMIZE_ALL" }
   | { type: "TOGGLE_MAXIMIZE"; id: string }
   | { type: "MOVE"; id: string; x: number; y: number }
   | { type: "RESIZE"; id: string; w: number; h: number };
@@ -80,6 +81,8 @@ function windowsReducer(
       return windows.map((w) =>
         w.id === action.id ? { ...w, minimized: true } : w,
       );
+    case "MINIMIZE_ALL":
+      return windows.map((w) => ({ ...w, minimized: true }));
     case "TOGGLE_MAXIMIZE":
       return windows.map((w) =>
         w.id === action.id
@@ -103,6 +106,7 @@ type WindowManager = {
   close: (id: string) => void;
   focus: (id: string) => void;
   minimize: (id: string) => void;
+  minimizeAll: () => void;
   toggleMaximize: (id: string) => void;
   move: (id: string, x: number, y: number) => void;
   resize: (id: string, w: number, h: number) => void;
@@ -128,6 +132,10 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
     (id: string) => dispatch({ type: "MINIMIZE", id }),
     [],
   );
+  const minimizeAll = useCallback(
+    () => dispatch({ type: "MINIMIZE_ALL" }),
+    [],
+  );
   const toggleMaximize = useCallback(
     (id: string) => dispatch({ type: "TOGGLE_MAXIMIZE", id }),
     [],
@@ -148,11 +156,12 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
       close,
       focus,
       minimize,
+      minimizeAll,
       toggleMaximize,
       move,
       resize,
     }),
-    [windows, open, close, focus, minimize, toggleMaximize, move, resize],
+    [windows, open, close, focus, minimize, minimizeAll, toggleMaximize, move, resize],
   );
   return (
     <WindowManagerContext.Provider value={value}>

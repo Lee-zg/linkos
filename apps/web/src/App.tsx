@@ -5,6 +5,7 @@ import { Desktop } from "./os/Desktop";
 import { WindowLayer } from "./os/Window";
 import { Dock } from "./os/Dock";
 import { ToastProvider, useToast } from "./os/Toaster";
+import { ContextMenuProvider } from "./os/ContextMenu";
 import { WorkspaceProvider, useWorkspace } from "./lib/workspace";
 import { SessionContext } from "./lib/session";
 import { dropSession } from "./lib/api";
@@ -39,7 +40,9 @@ function Workbench({
     <SessionContext.Provider value={{ profile, exit: onExit }}>
       <WorkspaceProvider>
         <WindowManagerProvider>
-          <Shell />
+          <ContextMenuProvider>
+            <Shell />
+          </ContextMenuProvider>
         </WindowManagerProvider>
       </WorkspaceProvider>
     </SessionContext.Provider>

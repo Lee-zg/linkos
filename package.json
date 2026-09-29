@@ -9,7 +9,7 @@
     "build": "pnpm --filter @linkos/web build",
     "typecheck": "pnpm --filter @linkos/web typecheck",
     "test:go": "go test ./services/gateway/... ./services/runner/...",
-    "test:web": "node --test \"apps/web/src/**/*.test.ts\"",
+    "test:web": "pnpm --filter @linkos/web test:web",
     "test:e2e": "pnpm --filter @linkos/web test:e2e"
   },
   "devDependencies": {

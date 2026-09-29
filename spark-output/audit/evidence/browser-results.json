@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-09-23T08:52:57.906Z",
+  "environment": {
+    "browser": "151.0.7922.34",
+    "base": "http://127.0.0.1:15173",
+    "isolatedGateway": true,
+    "runnerStarted": false
+  },
+  "checks": [
+    {
+      "id": "login",
+      "successful": true,
+      "role": "admin"
+    },
+    {
+      "id": "settings",
+      "notificationBeforeReopen": "false",
+      "notificationAfterReopen": "true",
+      "diagnosticDownloadEvents": 0
+    },
+    {
+      "id": "file-upload-download",
+      "successful": true,
+      "filename": "audit-shared-file.txt",
+      "failure": null
+    },
+    {
+      "id": "shared-directory",
+      "uploadedFileVisible": 0,
+      "staticFolderVisible": true
+    },
+    {
+      "id": "other-member-file-discovery",
+      "uploadedFileVisible": 0,
+      "emptyState": true
+    },
+    {
+      "id": "chat",
+      "sendSuccessful": true,
+      "draftAfterWindowReopen": ""
+    },
+    {
+      "id": "mobile-390",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "dock": {
+        "left": -55.5,
+        "right": 445.5,
+        "width": 501,
+        "overflows": true
+      },
+      "chatSidebarDisplay": "none",
+      "channelSwitcherCount": 0
+    },
+    {
+      "id": "truncated-code-save",
+      "fixtureOnly": true,
+      "originalLines": 2105,
+      "loadedLines": 2000,
+      "truncated": true,
+      "editable": true,
+      "linesAfterSaving": 2000,
+      "trailingLinePreserved": false
+    },
+    {
+      "id": "tasks-empty-state",
+      "visible": true,
+      "executionTested": false
+    },
+    {
+      "id": "admin",
+      "membersAndDevicesVisible": true,
+      "revokeTested": false
+    }
+  ],
+  "consoleErrors": []
+}

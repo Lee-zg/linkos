@@ -1,0 +1,169 @@
+# Instructions
+
+- Following Playwright test failed.
+- Explain why, be concise, respect Playwright best practices.
+- Provide a snippet of code with the fix, if possible.
+
+# Test info
+
+- Name: desktop-files.spec.ts >> real nested upload syncs to a member and a read-only guest
+- Location: e2e\desktop-files.spec.ts:118:1
+
+# Error details
+
+```
+Test timeout of 180000ms exceeded.
+```
+
+# Page snapshot
+
+```yaml
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - button "系统状态" [ref=e6] [cursor=pointer]
+    - button "文件" [ref=e11] [cursor=pointer]
+    - button "聊天" [ref=e18] [cursor=pointer]
+    - button "代码" [ref=e23] [cursor=pointer]
+    - button "任务" [ref=e30] [cursor=pointer]
+    - button "应用管理" [ref=e35] [cursor=pointer]
+    - button "设置" [ref=e43] [cursor=pointer]
+    - button "管理后台" [ref=e49] [cursor=pointer]
+  - dialog "文件" [ref=e55]:
+    - generic "文件 标题栏" [ref=e56]:
+      - generic "窗口控制" [ref=e57]:
+        - button "关闭 文件" [ref=e58]
+        - button "最小化 文件" [ref=e63]
+        - button "最大化 文件" [ref=e66]
+      - generic: 文件
+    - generic [ref=e71]:
+      - generic [ref=e72]:
+        - heading "共享根目录" [level=2] [ref=e74]
+        - button "后退" [ref=e75]
+        - button "前进" [disabled] [ref=e78]
+        - button "上一级" [disabled] [ref=e81]
+        - button "列表视图" [pressed] [ref=e84]
+        - button "图标视图" [ref=e86]
+        - button "新建文件夹" [ref=e89]
+        - button "上传文件" [ref=e92]
+        - button "刷新" [ref=e96]
+        - button "更多操作" [ref=e102]
+        - generic [ref=e107]:
+          - textbox "搜索文件" [ref=e108]:
+            - /placeholder: 搜索文件...
+          - combobox "排序方式" [ref=e109]:
+            - option "名称" [selected]
+            - option "修改时间"
+            - option "大小"
+          - button "排序方向" [ref=e110]: 升序
+      - generic [ref=e111]:
+        - navigation "文件位置" [ref=e112]:
+          - button "共享文件" [pressed] [ref=e113]
+          - button "最近文件" [ref=e114]
+          - button "本机历史" [ref=e115]
+          - button "传输队列" [ref=e116]
+        - generic "文件内容" [ref=e117]:
+          - grid "文件列表" [ref=e118]:
+            - row [ref=e119]:
+              - columnheader [ref=e120]:
+                - button "名称 ↑" [ref=e121]
+              - columnheader [ref=e122]:
+                - button "修改时间" [ref=e123]
+              - columnheader "类型" [ref=e124]
+              - columnheader [ref=e125]:
+                - button "大小" [ref=e126]
+            - row "共享目录-18643a41-eeb9-4607-a017-41fada0d8cf4" [ref=e127] [cursor=pointer]:
+              - gridcell "共享目录-18643a41-eeb9-4607-a017-41fada0d8cf4" [ref=e131]
+              - gridcell "6 分钟前" [ref=e132]
+              - gridcell "文件夹" [ref=e133]
+              - gridcell "—" [ref=e134]
+              - button "更多操作 共享目录-18643a41-eeb9-4607-a017-41fada0d8cf4" [ref=e135]
+            - row "共享目录-267fcae7-201b-41f5-8250-313176fb30b8" [ref=e140] [cursor=pointer]:
+              - gridcell "共享目录-267fcae7-201b-41f5-8250-313176fb30b8" [ref=e144]
+              - gridcell "13 分钟前" [ref=e145]
+              - gridcell "文件夹" [ref=e146]
+              - gridcell "—" [ref=e147]
+              - button "更多操作 共享目录-267fcae7-201b-41f5-8250-313176fb30b8" [ref=e148]
+            - row "共享目录-8431c948-5cfc-4151-9008-e366c7e9ac98" [ref=e153] [cursor=pointer]:
+              - gridcell "共享目录-8431c948-5cfc-4151-9008-e366c7e9ac98" [ref=e157]
+              - gridcell "刚刚" [ref=e158]
+              - gridcell "文件夹" [ref=e159]
+              - gridcell "—" [ref=e160]
+              - button "更多操作 共享目录-8431c948-5cfc-4151-9008-e366c7e9ac98" [ref=e161]
+            - row "共享目录-8af6d8c3-98e6-4f18-9a5c-c411e7a3561d" [ref=e166] [cursor=pointer]:
+              - gridcell "共享目录-8af6d8c3-98e6-4f18-9a5c-c411e7a3561d" [ref=e170]
+              - gridcell "3 分钟前" [ref=e171]
+              - gridcell "文件夹" [ref=e172]
+              - gridcell "—" [ref=e173]
+              - button "更多操作 共享目录-8af6d8c3-98e6-4f18-9a5c-c411e7a3561d" [ref=e174]
+            - row "共享目录-99adf5d8-cc02-4336-aa9f-68ae562e6c6d" [ref=e179] [cursor=pointer]:
+              - gridcell "共享目录-99adf5d8-cc02-4336-aa9f-68ae562e6c6d" [ref=e183]
+              - gridcell "5 分钟前" [ref=e184]
+              - gridcell "文件夹" [ref=e185]
+              - gridcell "—" [ref=e186]
+              - button "更多操作 共享目录-99adf5d8-cc02-4336-aa9f-68ae562e6c6d" [ref=e187]
+            - row "共享目录-c88bc759-fb0f-4ff1-ace9-1a3fa0e59cce" [ref=e192] [cursor=pointer]:
+              - gridcell "共享目录-c88bc759-fb0f-4ff1-ace9-1a3fa0e59cce" [ref=e196]
+              - gridcell "23 分钟前" [ref=e197]
+              - gridcell "文件夹" [ref=e198]
+              - gridcell "—" [ref=e199]
+              - button "更多操作 共享目录-c88bc759-fb0f-4ff1-ace9-1a3fa0e59cce" [ref=e200]
+            - row "共享目录-cd794558-2780-424d-87b4-63ac45232cfd" [ref=e205] [cursor=pointer]:
+              - gridcell "共享目录-cd794558-2780-424d-87b4-63ac45232cfd" [ref=e209]
+              - gridcell "10 分钟前" [ref=e210]
+              - gridcell "文件夹" [ref=e211]
+              - gridcell "—" [ref=e212]
+              - button "更多操作 共享目录-cd794558-2780-424d-87b4-63ac45232cfd" [ref=e213]
+            - row "共享目录-e030ce1d-07af-46db-a9d2-8598072048d5" [ref=e218] [cursor=pointer]:
+              - gridcell "共享目录-e030ce1d-07af-46db-a9d2-8598072048d5" [ref=e222]
+              - gridcell "15 分钟前" [ref=e223]
+              - gridcell "文件夹" [ref=e224]
+              - gridcell "—" [ref=e225]
+              - button "更多操作 共享目录-e030ce1d-07af-46db-a9d2-8598072048d5" [ref=e226]
+            - row "协作-3f976832-66d4-4ef5-8dae-0890b16871f9" [ref=e231] [cursor=pointer]:
+              - gridcell "协作-3f976832-66d4-4ef5-8dae-0890b16871f9" [ref=e235]
+              - gridcell "1 小时前" [ref=e236]
+              - gridcell "文件夹" [ref=e237]
+              - gridcell "—" [ref=e238]
+              - button "更多操作 协作-3f976832-66d4-4ef5-8dae-0890b16871f9" [ref=e239]
+            - row "协作-e041d2eb-1288-4bc9-afa3-7df567810d75" [ref=e244] [cursor=pointer]:
+              - gridcell "协作-e041d2eb-1288-4bc9-afa3-7df567810d75" [ref=e248]
+              - gridcell "1 小时前" [ref=e249]
+              - gridcell "文件夹" [ref=e250]
+              - gridcell "—" [ref=e251]
+              - button "更多操作 协作-e041d2eb-1288-4bc9-afa3-7df567810d75" [ref=e252]
+            - row "内容-2bbc3261-898a-4da1-816b-e1da5abf8e09.txt-renamed" [selected] [ref=e257] [cursor=pointer]:
+              - gridcell "内容-2bbc3261-898a-4da1-816b-e1da5abf8e09.txt-renamed" [ref=e262]
+              - gridcell "刚刚" [ref=e263]
+              - gridcell "文件" [ref=e264]
+              - gridcell "26 B" [ref=e265]
+              - button "更多操作 内容-2bbc3261-898a-4da1-816b-e1da5abf8e09.txt-renamed" [ref=e266]
+            - row "内容-4dbab8b9-f3c0-4695-8b86-da185a1fea21.txt-renamed" [ref=e271] [cursor=pointer]:
+              - gridcell "内容-4dbab8b9-f3c0-4695-8b86-da185a1fea21.txt-renamed" [ref=e276]
+              - gridcell "5 分钟前" [ref=e277]
+              - gridcell "文件" [ref=e278]
+              - gridcell "26 B" [ref=e279]
+              - button "更多操作 内容-4dbab8b9-f3c0-4695-8b86-da185a1fea21.txt-renamed" [ref=e280]
+            - row "内容-d899cf8a-6284-4deb-b614-0d0d629aab09.txt-renamed" [ref=e285] [cursor=pointer]:
+              - gridcell "内容-d899cf8a-6284-4deb-b614-0d0d629aab09.txt-renamed" [ref=e290]
+              - gridcell "3 分钟前" [ref=e291]
+              - gridcell "文件" [ref=e292]
+              - gridcell "26 B" [ref=e293]
+              - button "更多操作 内容-d899cf8a-6284-4deb-b614-0d0d629aab09.txt-renamed" [ref=e294]
+      - navigation "文件路径" [ref=e299]:
+        - button "共享根目录" [ref=e301]
+      - generic [ref=e302]:
+        - generic [ref=e303]: 13 / 13 个项目
+        - generic [ref=e304]: 已连接
+      - button "选择要上传的文件" [ref=e305]
+  - generic [ref=e307]:
+    - status "已连接工作区" [ref=e308]
+    - button "系统状态" [ref=e309] [cursor=pointer]
+    - button "文件" [ref=e314] [cursor=pointer]
+    - button "聊天" [ref=e321] [cursor=pointer]
+    - button "代码" [ref=e326] [cursor=pointer]
+    - button "任务" [ref=e333] [cursor=pointer]
+    - button "应用管理" [ref=e338] [cursor=pointer]
+    - button "设置" [ref=e346] [cursor=pointer]
+    - button "管理后台" [ref=e352] [cursor=pointer]
+    - button "退出登录" [ref=e359] [cursor=pointer]
+```

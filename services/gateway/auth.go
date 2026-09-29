@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -18,8 +20,10 @@ const sessionTTL = time.Hour
 const refreshTTL = 30 * 24 * time.Hour
 
 const (
+	roleOwner  = "owner"
 	roleMember = "member"
 	roleAdmin  = "admin"
+	roleGuest  = "guest"
 
 	accessTypeLogin     = "login"
 	accessTypeAnonymous = "anonymous"
@@ -39,7 +43,7 @@ func roleAllows(role, permission string) bool {
 		case "workspace.read", "resource.read", "resource.write", "chat.read", "chat.send", "code.read", "code.write", "code.run", "job.submit", "job.cancel", "runner.read", "plugin.read":
 			return true
 		}
-	case "guest":
+	case roleGuest:
 		return permission == "workspace.read" || permission == "resource.read" || permission == "chat.read" || permission == "code.read" || permission == "runner.read" || permission == "plugin.read"
 	}
 	return false
@@ -91,6 +95,8 @@ type sessionRequest struct {
 	DeviceID    string
 	PublicKey   string
 	InviteCode  string
+	ChallengeID string
+	Signature   string
 }
 
 type authStore struct {
@@ -103,8 +109,18 @@ type authStore struct {
 	sessionsByUser map[string][]string
 	refreshTokens  map[string]refreshRecord
 	devices        map[string]deviceRecord
+	challenges     map[string]deviceChallenge
 	invites        map[string]time.Time
 	usedInvites    map[string]bool
+}
+
+type deviceChallenge struct {
+	ID          string
+	WorkspaceID string
+	DeviceID    string
+	Nonce       string
+	Message     string
+	ExpiresAt   time.Time
 }
 
 type memberView struct {
@@ -132,6 +148,7 @@ func newAuthStore(workspaceID, adminPasscode string, policy *accessPolicy, recor
 		sessionsByUser: make(map[string][]string),
 		refreshTokens:  make(map[string]refreshRecord),
 		devices:        make(map[string]deviceRecord),
+		challenges:     make(map[string]deviceChallenge),
 		invites:        make(map[string]time.Time),
 		usedInvites:    make(map[string]bool),
 	}
@@ -232,6 +249,7 @@ func (a *authStore) issueSession(req sessionRequest) (authPrincipal, accessRecor
 		if !allowFull {
 			return authPrincipal{}, accessRecord{}, "ACCESS_DENIED"
 		}
+		role = roleGuest
 	default:
 		return authPrincipal{}, accessRecord{}, "INVALID_REQUEST"
 	}
@@ -256,14 +274,42 @@ func (a *authStore) issueSession(req sessionRequest) (authPrincipal, accessRecor
 		deviceID = "dev_" + token[:12]
 	}
 	userID := "usr_" + token[:12]
+	publicKey := strings.TrimSpace(req.PublicKey)
+
 	a.mu.Lock()
-	if existing, ok := a.devices[deviceID]; ok && existing.RevokedAt.IsZero() {
+	if existing, ok := a.devices[deviceID]; ok {
+		if !existing.RevokedAt.IsZero() || existing.WorkspaceID != workspaceID {
+			a.mu.Unlock()
+			return authPrincipal{}, accessRecord{}, "INVALID_REQUEST"
+		}
+		if req.ChallengeID == "" {
+			a.mu.Unlock()
+			return authPrincipal{}, accessRecord{}, "DEVICE_CHALLENGE_REQUIRED"
+		}
+		if !a.verifyDeviceChallengeLocked(req.ChallengeID, workspaceID, deviceID, existing.PublicKey, req.Signature) {
+			a.mu.Unlock()
+			return authPrincipal{}, accessRecord{}, "DEVICE_CHALLENGE_FAILED"
+		}
 		userID = existing.UserID
 		if displayName == "" {
 			displayName = existing.DisplayName
 		}
+		// A login proves possession; it is not a public-key rotation endpoint.
+		publicKey = existing.PublicKey
+	} else if publicKey != "" {
+		key, err := base64.RawURLEncoding.Strict().DecodeString(publicKey)
+		if err != nil || len(key) != ed25519.PublicKeySize || base64.RawURLEncoding.EncodeToString(key) != publicKey {
+			a.mu.Unlock()
+			return authPrincipal{}, accessRecord{}, "INVALID_REQUEST"
+		}
+		// First registration remains supported without a challenge. When a client
+		// supplies one, verify and consume it just like a returning device's proof.
+		if req.ChallengeID != "" && !a.verifyDeviceChallengeLocked(req.ChallengeID, workspaceID, deviceID, publicKey, req.Signature) {
+			a.mu.Unlock()
+			return authPrincipal{}, accessRecord{}, "DEVICE_CHALLENGE_FAILED"
+		}
 	}
-	a.mu.Unlock()
+
 	principal := authPrincipal{
 		Token:        token,
 		UserID:       userID,
@@ -288,12 +334,11 @@ func (a *authStore) issueSession(req sessionRequest) (authPrincipal, accessRecor
 	}
 	a.records.add(&record)
 
-	a.mu.Lock()
 	a.sessions[token] = principal
 	a.sessionsByUser[principal.UserID] = append(a.sessionsByUser[principal.UserID], token)
 	a.refreshTokens[refreshKey(refreshToken)] = refreshRecord{UserID: principal.UserID, DeviceID: deviceID, DisplayName: principal.DisplayName, WorkspaceID: principal.WorkspaceID, Role: principal.Role, AccessType: principal.AccessType, Status: principal.Status, ExpiresAt: now.Add(refreshTTL)}
-	if strings.TrimSpace(req.PublicKey) != "" {
-		a.devices[deviceID] = deviceRecord{ID: deviceID, UserID: principal.UserID, WorkspaceID: workspaceID, DisplayName: displayName, PublicKey: strings.TrimSpace(req.PublicKey), CreatedAt: now, LastSeenAt: now}
+	if publicKey != "" {
+		a.devices[deviceID] = deviceRecord{ID: deviceID, UserID: principal.UserID, WorkspaceID: workspaceID, DisplayName: displayName, PublicKey: publicKey, CreatedAt: now, LastSeenAt: now}
 	}
 	a.persistAuthLocked()
 	a.mu.Unlock()
@@ -317,22 +362,22 @@ func (a *authStore) createInvite() (string, time.Time, bool) {
 
 func (a *authStore) rotateRefresh(token string) (authPrincipal, bool) {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	key := refreshKey(token)
 	record, ok := a.refreshTokens[key]
 	if !ok || record.Revoked || time.Now().UTC().After(record.ExpiresAt) {
-		a.mu.Unlock()
 		return authPrincipal{}, false
 	}
 	record.Revoked = true
 	a.refreshTokens[key] = record
+	// Refresh records carry authorization updates; another session on this
+	// device may have a different access type or role. Keep rotation locked
+	// so concurrent updates and revocations also cover the replacement tokens.
 	base := authPrincipal{UserID: record.UserID, DeviceID: record.DeviceID, DisplayName: record.DisplayName, WorkspaceID: record.WorkspaceID, Role: record.Role, AccessType: record.AccessType, Status: record.Status}
-	for _, principal := range a.sessions {
-		if principal.UserID == record.UserID && principal.DeviceID == record.DeviceID {
-			base = principal
-			break
-		}
+	if base.AccessType == accessTypeGuest {
+		// Legacy persisted guest records may still have the member role.
+		base.Role = roleGuest
 	}
-	a.mu.Unlock()
 	if base.UserID == "" {
 		return authPrincipal{}, false
 	}
@@ -348,12 +393,10 @@ func (a *authStore) rotateRefresh(token string) (authPrincipal, bool) {
 	base.Token = base64.RawURLEncoding.EncodeToString(accessBytes)
 	base.RefreshToken = base64.RawURLEncoding.EncodeToString(refreshBytes)
 	base.ExpiresAt = now.Add(sessionTTL)
-	a.mu.Lock()
 	a.sessions[base.Token] = base
 	a.sessionsByUser[base.UserID] = append(a.sessionsByUser[base.UserID], base.Token)
 	a.refreshTokens[refreshKey(base.RefreshToken)] = refreshRecord{UserID: base.UserID, DeviceID: base.DeviceID, DisplayName: base.DisplayName, WorkspaceID: base.WorkspaceID, Role: base.Role, AccessType: base.AccessType, Status: base.Status, ExpiresAt: now.Add(refreshTTL)}
 	a.persistAuthLocked()
-	a.mu.Unlock()
 	return base, true
 }
 
@@ -476,13 +519,20 @@ func (a *authStore) revokeDevice(id string) bool {
 
 func (a *authStore) setUserStatus(userID, status string) {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	for _, token := range a.sessionsByUser[userID] {
 		if principal, ok := a.sessions[token]; ok {
 			principal.Status = status
 			a.sessions[token] = principal
 		}
 	}
-	a.mu.Unlock()
+	for token, record := range a.refreshTokens {
+		if record.UserID == userID {
+			record.Status = status
+			a.refreshTokens[token] = record
+		}
+	}
+	a.persistAuthLocked()
 }
 
 func (a *authStore) authenticateRequest(r *http.Request, workspaceID string) (authPrincipal, bool) {
@@ -542,4 +592,60 @@ func requireActive(auth *authStore, workspaceID string, handler http.HandlerFunc
 			writeAPIError(w, http.StatusForbidden, "ACCESS_REVOKED", "access has been revoked")
 		}
 	}
+}
+
+const deviceChallengeTTL = 5 * time.Minute
+
+func (a *authStore) createDeviceChallenge(workspaceID, deviceID string) (deviceChallenge, string) {
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return deviceChallenge{}, "INTERNAL_ERROR"
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	message := "linkos-device-challenge-v1\n" + workspaceID + "\n" + deviceID + "\n" + nonce
+	idBytes := make([]byte, 12)
+	if _, err := rand.Read(idBytes); err != nil {
+		return deviceChallenge{}, "INTERNAL_ERROR"
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now().UTC()
+	for id, challenge := range a.challenges {
+		if !now.Before(challenge.ExpiresAt) {
+			delete(a.challenges, id)
+		}
+	}
+	challenge := deviceChallenge{
+		ID:          "chal_" + hex.EncodeToString(idBytes),
+		WorkspaceID: workspaceID,
+		DeviceID:    deviceID,
+		Nonce:       nonce,
+		Message:     message,
+		ExpiresAt:   now.Add(deviceChallengeTTL),
+	}
+	a.challenges[challenge.ID] = challenge
+	return challenge, ""
+}
+
+func (a *authStore) verifyDeviceChallengeLocked(challengeID, workspaceID, deviceID, storedPublicKey, signature string) bool {
+	challenge, ok := a.challenges[challengeID]
+	if !ok {
+		return false
+	}
+	delete(a.challenges, challengeID)
+	if challenge.WorkspaceID != workspaceID || challenge.DeviceID != deviceID {
+		return false
+	}
+	if !time.Now().UTC().Before(challenge.ExpiresAt) {
+		return false
+	}
+	publicKey, err := base64.RawURLEncoding.Strict().DecodeString(storedPublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize || base64.RawURLEncoding.EncodeToString(publicKey) != storedPublicKey {
+		return false
+	}
+	proof, err := base64.RawURLEncoding.Strict().DecodeString(signature)
+	if err != nil || len(proof) != ed25519.SignatureSize || base64.RawURLEncoding.EncodeToString(proof) != signature {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(publicKey), []byte(challenge.Message), proof)
 }

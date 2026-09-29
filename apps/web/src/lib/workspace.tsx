@@ -8,8 +8,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { JobSpec, JobStatus } from "@linkos/protocol";
-import { getJob, listMessages, sendMessage as postMessage, submitJob } from "./api";
+import type { JobSpec, JobStatus, WorkspaceSnapshot } from "@linkos/protocol";
+import { getJob, getSnapshot, listMessages, sendMessage as postMessage, submitJob } from "./api";
 import { useWorkspaceSocket, type SocketEvent } from "./useWorkspaceSocket";
 
 export type Message = {
@@ -38,6 +38,9 @@ function isJobStatus(value: unknown): value is JobStatus {
 type Workspace = {
   connected: boolean;
   lastSeq: number;
+  resyncSeq: number;
+  directoryVersion: number;
+  snapshot: WorkspaceSnapshot | null;
   lastEvent: SocketEvent | null;
   messages: Message[];
   sendMessage: (body: string, channelId?: string, threadId?: string) => void;
@@ -53,11 +56,45 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [jobStatus, setJobStatus] = useState<JobStatus>("queued");
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [lastEvent, setLastEvent] = useState<SocketEvent | null>(null);
+  const [directoryVersion, setDirectoryVersion] = useState(0);
+  const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
   const localMessageIds = useRef(new Set<string>());
   const messageCounter = useRef(0);
 
+  const refetchMessages = useCallback(() => {
+    return listMessages({ channelId: "engineering", limit: 100 })
+      .then((result) => {
+        setMessages(
+          result.items.map((message) => ({
+            id: message.id,
+            author: message.authorName,
+            initials: message.authorName.slice(0, 1),
+            body: message.body,
+            time: new Date(message.createdAt).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+          })),
+        );
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const onSnapshotRequired = useCallback(() => {
+    setDirectoryVersion((version) => version + 1);
+    localMessageIds.current.clear();
+    setSnapshot(null);
+    void getSnapshot()
+      .then((value) => setSnapshot(value))
+      .catch(() => undefined);
+    void refetchMessages();
+  }, [refetchMessages]);
+
   const onSocketEvent = useCallback((event: SocketEvent) => {
     setLastEvent(event);
+    if (event.type === "resources.changed") {
+      setDirectoryVersion((version) => version + 1);
+    }
     if (event.type === "chat.message.created") {
       const payload = event.payload as {
         body?: string;
@@ -100,14 +137,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const { connected, lastSeq } = useWorkspaceSocket({ onEvent: onSocketEvent });
+  const { connected, lastSeq, resyncSeq } = useWorkspaceSocket({
+    onEvent: onSocketEvent,
+    onSnapshotRequired,
+  });
 
   useEffect(() => {
     if (!connected) return;
-    void listMessages({ channelId: "engineering", limit: 100 }).then((result) => {
-      setMessages(result.items.map((message) => ({ id: message.id, author: message.authorName, initials: message.authorName.slice(0, 1), body: message.body, time: new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) })));
-    }).catch(() => undefined);
-  }, [connected]);
+    void refetchMessages();
+  }, [connected, refetchMessages]);
 
   useEffect(() => {
     if (!currentJobId || !["queued", "preparing", "running"].includes(jobStatus)) return;
@@ -163,6 +201,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     () => ({
       connected,
       lastSeq,
+      resyncSeq,
+      directoryVersion,
+      snapshot,
       lastEvent,
       messages,
       sendMessage,
@@ -170,7 +211,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       currentJobId,
       runTask,
     }),
-    [connected, lastSeq, lastEvent, messages, sendMessage, jobStatus, currentJobId, runTask],
+    [connected, lastSeq, resyncSeq, directoryVersion, snapshot, lastEvent, messages, sendMessage, jobStatus, currentJobId, runTask],
   );
   return (
       <WorkspaceContext.Provider value={value}>

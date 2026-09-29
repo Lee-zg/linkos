@@ -6,23 +6,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-// errCASQuotaExceeded is returned when a single object is larger than the
-// whole content-store disk quota, so it can never be stored.
-var errCASQuotaExceeded = errors.New("object exceeds the content store disk quota")
+// errCASQuotaExceeded is returned when new content would exceed the
+// content-store disk quota, without removing any existing objects.
+var errCASQuotaExceeded = errors.New("content store disk quota exceeded")
 
 // contentStore is a content-addressed object store under <root>/objects.
 // Objects are keyed by the SHA-256 of their bytes, so identical uploads
 // deduplicate to one file and a resourceId names the content rather than
-// the upload session that produced it. When maxDiskBytes is positive the
-// pool is quota-bounded: commits that would exceed it evict objects with
-// the oldest modification time first (downloads refresh mtime, making the
-// policy LRU). Evicted objects lose their resourceId targets.
+// the upload session that produced it. When maxDiskBytes is positive,
+// commits that would exceed it are rejected; shared objects are never evicted.
+// Deleting a directory entry does not reclaim CAS bytes or quota headroom.
 type contentStore struct {
 	root         string
 	maxDiskBytes int64
@@ -63,12 +61,10 @@ func (c *contentStore) commit(temporaryPath, hash string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		size := info.Size()
-		if size > c.maxDiskBytes {
-			_ = os.Remove(temporaryPath)
-			return "", errCASQuotaExceeded
-		}
-		if err := c.makeRoom(size); err != nil {
+		if err := c.checkQuota(info.Size()); err != nil {
+			if errors.Is(err, errCASQuotaExceeded) {
+				_ = os.Remove(temporaryPath)
+			}
 			return "", err
 		}
 	}
@@ -81,42 +77,26 @@ func (c *contentStore) commit(temporaryPath, hash string) (string, error) {
 	return path, nil
 }
 
-type objectEntry struct {
-	path    string
-	size    int64
-	modTime time.Time
-}
-
-// makeRoom evicts the least recently used objects until the incoming size
-// fits under the quota. Callers hold c.mu.
-func (c *contentStore) makeRoom(incoming int64) error {
-	usage, candidates, err := c.scanObjects()
+// checkQuota rejects new content that would exceed the quota without
+// deleting existing objects. Callers hold c.mu and use a positive quota.
+func (c *contentStore) checkQuota(incoming int64) error {
+	if incoming > c.maxDiskBytes {
+		return errCASQuotaExceeded
+	}
+	usage, err := c.scanObjects()
 	if err != nil {
 		return err
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if !candidates[i].modTime.Equal(candidates[j].modTime) {
-			return candidates[i].modTime.Before(candidates[j].modTime)
-		}
-		return candidates[i].path < candidates[j].path
-	})
-	for _, victim := range candidates {
-		if usage+incoming <= c.maxDiskBytes {
-			break
-		}
-		if err := os.Remove(victim.path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		usage -= victim.size
-		log.Printf("content store quota: evicted %s (%d bytes)", victim.path, victim.size)
+	// Subtract to avoid overflowing when adding usage and incoming.
+	if usage > c.maxDiskBytes-incoming {
+		return errCASQuotaExceeded
 	}
 	return nil
 }
 
-func (c *contentStore) scanObjects() (int64, []objectEntry, error) {
+func (c *contentStore) scanObjects() (int64, error) {
 	var usage int64
-	var entries []objectEntry
-	err := filepath.WalkDir(c.root, func(path string, d os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(c.root, func(_ string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -128,14 +108,12 @@ func (c *contentStore) scanObjects() (int64, []objectEntry, error) {
 			return infoErr
 		}
 		usage += info.Size()
-		entries = append(entries, objectEntry{path: path, size: info.Size(), modTime: info.ModTime()})
 		return nil
 	})
-	return usage, entries, err
+	return usage, err
 }
 
-// touchObject refreshes the object's modification time so quota eviction
-// treats it as recently used. Failures only degrade eviction ordering.
+// touchObject records download time; quota decisions do not depend on recency.
 func (c *contentStore) touchObject(path string) {
 	now := time.Now()
 	if err := os.Chtimes(path, now, now); err != nil {

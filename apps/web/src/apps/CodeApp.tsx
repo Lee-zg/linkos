@@ -21,8 +21,9 @@ export function CodeApp() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<CodeConflict | null>(null);
+  const [preview, setPreview] = useState<{ lineEnd: number; totalLines: number; hasDraft: boolean } | null>(null);
   const running = jobStatus === "running" || jobStatus === "preparing" || jobStatus === "queued";
-  const readOnly = !connected || (file?.size ?? 0) > 5 * 1024 * 1024;
+  const readOnly = loading || preview !== null || !connected || (file?.size ?? 0) > 5 * 1024 * 1024;
 
   const openFile = useCallback(async (next: CodeFile) => {
     setLoading(true);
@@ -33,8 +34,9 @@ export function CodeApp() {
       const draft = window.localStorage.getItem(draftKey);
       setFile(loaded.file);
       setBaseVersion(loaded.file.version);
-      setContent(draft ?? loaded.content);
-      setDirty(draft !== null && draft !== loaded.content);
+      setPreview(loaded.truncated ? { lineEnd: loaded.lineEnd, totalLines: loaded.totalLines, hasDraft: draft !== null } : null);
+      setContent(loaded.truncated ? loaded.content : draft ?? loaded.content);
+      setDirty(!loaded.truncated && draft !== null && draft !== loaded.content);
     } catch {
       toast("代码加载失败", "请检查权限和网关连接。");
     } finally {
@@ -83,7 +85,7 @@ export function CodeApp() {
   };
 
   const saveAs = async () => {
-    if (!file) return;
+    if (!file || readOnly) return;
     const path = window.prompt("另存为项目内路径", file.path.replace(/(\.[^/.]+)?$/, "-copy$1"));
     if (!path?.trim()) return;
     try {
@@ -116,7 +118,8 @@ export function CodeApp() {
         </div>
         {conflict && <div className="flex flex-wrap items-center gap-2 border-b border-warning/40 bg-warning/10 px-3 py-2 text-xs" role="alert"><AlertTriangle size={14} className="text-warning-foreground" /><span className="min-w-0 flex-1">服务器版本为 {conflict.current?.version}，当前草稿基于 {conflict.baseVersion}。</span><button className="rounded-md border bg-background px-2 py-1" onClick={() => file && void openFile(file)}>加载服务器版本</button><button className="rounded-md border bg-background px-2 py-1" onClick={() => void saveAs()}>另存为</button>{(profile.role === "admin" || profile.role === "owner") && <button className="rounded-md bg-destructive px-2 py-1 text-destructive-foreground" onClick={() => { if (window.confirm("覆盖服务器当前版本？此操作会创建新的审计版本。")) void save(true); }}>覆盖保存</button>}</div>}
         {!connected && <div className="border-b bg-warning/10 px-4 py-2 text-xs text-warning-foreground">网关离线，草稿仍会保存在本机。</div>}
-        <div className="flex items-center gap-4 border-b px-3 py-1.5 font-mono text-[10px] text-muted-foreground"><span>{dirty ? "草稿已自动保存" : `已同步 ${baseVersion || "-"}`}</span><span>{file?.language || "text"}</span><span className="ml-auto">{lineCount} lines</span></div>
+        {preview && !loading && <div className="border-b border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground" role="alert">仅预览前 {preview.lineEnd} 行，共 {preview.totalLines} 行。内容未完整加载，已禁用编辑和保存，避免丢失未加载内容。{preview.hasDraft && "本机草稿已保留，未自动恢复。"}</div>}
+        <div className="flex items-center gap-4 border-b px-3 py-1.5 font-mono text-[10px] text-muted-foreground"><span>{preview ? "截断预览" : dirty ? "草稿已自动保存" : `已同步 ${baseVersion || "-"}`}</span><span>{file?.language || "text"}</span><span className="ml-auto">{lineCount} lines</span></div>
         <div className="min-h-0 flex-1 bg-muted/20">{loading ? <p className="p-4 text-xs text-muted-foreground">加载代码...</p> : file ? <CodeEditor value={content} language={file.language} readOnly={readOnly} onChange={(next) => { setContent(next); setDirty(true); }} /> : <p className="p-4 text-xs text-muted-foreground">项目中没有代码文件。</p>}</div>
         <div className="flex shrink-0 items-center gap-3 border-t px-3 py-2 text-[10px] text-muted-foreground"><span>{readOnly ? "只读" : "可编辑"}</span><span>{file ? `${Math.max(1, Math.round(file.size / 1024))} KB` : "-"}</span><span className="ml-auto">UTF-8</span>{saving && <RefreshCw size={11} className="animate-spin" />}</div>
       </div>

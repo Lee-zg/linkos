@@ -228,6 +228,8 @@ func handleSessionIssue(auth *authStore, h *hub, audit *auditStore, limiter *rat
 			DeviceID    string `json:"deviceId"`
 			PublicKey   string `json:"publicKey"`
 			InviteCode  string `json:"inviteCode"`
+			ChallengeID string `json:"challengeId"`
+			Signature   string `json:"signature"`
 		}
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -242,6 +244,8 @@ func handleSessionIssue(auth *authStore, h *hub, audit *auditStore, limiter *rat
 			DeviceID:    body.DeviceID,
 			PublicKey:   body.PublicKey,
 			InviteCode:  body.InviteCode,
+			ChallengeID: body.ChallengeID,
+			Signature:   body.Signature,
 		})
 		switch errCode {
 		case "":
@@ -277,11 +281,56 @@ func handleSessionIssue(auth *authStore, h *hub, audit *auditStore, limiter *rat
 				RemoteAddr: r.RemoteAddr,
 			})
 			writeAPIError(w, http.StatusForbidden, "ACCESS_DENIED", "access mode is disabled by workspace policy")
+		case "DEVICE_CHALLENGE_REQUIRED":
+			writeAPIError(w, http.StatusConflict, "DEVICE_CHALLENGE_REQUIRED", "registered device must complete challenge")
+		case "DEVICE_CHALLENGE_FAILED":
+			writeAPIError(w, http.StatusForbidden, "DEVICE_CHALLENGE_FAILED", "device challenge verification failed")
 		case "INTERNAL_ERROR":
 			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create workspace session")
 		default:
 			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "session request is invalid")
 		}
+	}
+}
+
+func handleSessionChallenge(auth *authStore, limiter *rateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+			return
+		}
+		if !limiter.allow(clientIP(r)) {
+			writeAPIError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many requests, retry later")
+			return
+		}
+		var body struct {
+			WorkspaceID string `json:"workspaceId"`
+			DeviceID    string `json:"deviceId"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		workspaceID := strings.TrimSpace(body.WorkspaceID)
+		if workspaceID == "" {
+			workspaceID = auth.workspaceID
+		}
+		deviceID := strings.TrimSpace(body.DeviceID)
+		if workspaceID != auth.workspaceID || deviceID == "" {
+			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "workspaceId and deviceId are required")
+			return
+		}
+		challenge, errCode := auth.createDeviceChallenge(workspaceID, deviceID)
+		if errCode != "" {
+			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create device challenge")
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"challengeId": challenge.ID,
+			"deviceId":    challenge.DeviceID,
+			"nonce":       challenge.Nonce,
+			"message":     challenge.Message,
+			"expiresAt":   challenge.ExpiresAt.Format(time.RFC3339),
+		})
 	}
 }
 
@@ -620,6 +669,7 @@ func requireAdmin(auth *authStore, handler http.HandlerFunc) http.HandlerFunc {
 func registerAccessRoutes(mux *http.ServeMux, auth *authStore, h *hub, audit *auditStore, limiter *rateLimiter) {
 	admin := &accessAdmin{auth: auth, hub: h, audit: audit}
 	mux.HandleFunc("/api/v1/sessions", handleSessionIssue(auth, h, audit, limiter))
+	mux.HandleFunc("/api/v1/sessions/challenge", handleSessionChallenge(auth, limiter))
 	mux.HandleFunc("/api/v1/sessions/refresh", handleSessionRefresh(auth))
 	mux.HandleFunc("/api/v1/sessions/revoke", handleSessionRevoke(auth))
 	mux.HandleFunc("/api/v1/me", handleMe(auth))

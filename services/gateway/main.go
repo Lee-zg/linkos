@@ -397,12 +397,32 @@ func main() {
 	uploads := newUploadStoreWithBackend(defaultUploadRoot(), backend)
 	auth := newAuthStore("demo", adminPasscode(), newAccessPolicyWithBackend(backend), newAccessStoreWithBackend(backend))
 	audit := newAuditStoreWithBackend(backend)
-	sessionLimiter := newRateLimiter(12, 0.5)
+	sessionCapacity := 12
+	sessionRefill := 0.5
+	if raw := os.Getenv("LINKOS_SESSION_RATE_CAPACITY"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			sessionCapacity = v
+		}
+	}
+	if raw := os.Getenv("LINKOS_SESSION_RATE_REFILL"); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+			sessionRefill = v
+		}
+	}
+	sessionLimiter := newRateLimiter(sessionCapacity, sessionRefill)
 	mvp := newMVPStore(backend, h)
 	mvp.audit = audit
 	mvp.contentDownload = uploads.content.handleDownload
 	mvp.content = uploads.content
+	if uploads.loadErr != nil {
+		log.Fatalf("initialize uploads: %v", uploads.loadErr)
+	}
+	if err := mvp.initializeFileStorage(uploads.content); err != nil {
+		log.Fatalf("initialize file storage: %v", err)
+	}
 	registerMVPAuth(mvp, auth)
+	uploads.auth = auth
+	uploads.committer = mvp
 	discovery := newDiscoveryService()
 	defer discovery.close()
 	mux := http.NewServeMux()
@@ -420,7 +440,7 @@ func main() {
 	mux.HandleFunc("/api/v1/workspaces/demo/snapshot", requireActive(auth, "demo", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, snapshot()) }))
 	mux.HandleFunc("/api/v1/uploads", requireActive(auth, "demo", uploads.handleCollection))
 	mux.HandleFunc("/api/v1/uploads/", requireActive(auth, "demo", uploads.handleItem))
-	mux.HandleFunc("/api/v1/files/", requireActive(auth, "demo", uploads.content.handleDownload))
+	mux.HandleFunc("/api/v1/files/", requireActive(auth, "demo", mvp.handleAuthorizedDownload))
 	registerMVPRoutes(mux, auth, mvp)
 	handleJobRoutes(mux, auth, mvp)
 	mux.HandleFunc("/api/v1/ws", requireActive(auth, "demo", h.handleWS))

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
-import { Minus, Square, X } from "lucide-react";
+import { Minus, Square, X, Maximize2, Minimize2 } from "lucide-react";
 import type { WindowState } from "./types";
 import { getApp } from "./apps";
 import { useWindowManager } from "./window-manager";
+import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(
@@ -20,6 +21,7 @@ function useIsMobile() {
 export function Window({ win }: { win: WindowState }) {
   const { close, focus, minimize, toggleMaximize, move, resize } =
     useWindowManager();
+  const { open: openMenu } = useContextMenu();
   const frameRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<number>();
   const isMobile = useIsMobile();
@@ -44,7 +46,36 @@ export function Window({ win }: { win: WindowState }) {
     closeTimerRef.current = window.setTimeout(() => close(win.id), 150);
   };
 
+  const titleBarMenu: ContextMenuItem[] = [
+    {
+      id: "minimize",
+      label: "最小化",
+      icon: <Minimize2 size={14} />,
+      onClick: () => minimize(win.id),
+    },
+    {
+      id: "maximize",
+      label: win.maximized ? "还原" : "最大化",
+      icon: <Maximize2 size={14} />,
+      onClick: () => toggleMaximize(win.id),
+    },
+    {
+      id: "close",
+      label: "关闭",
+      icon: <X size={14} />,
+      onClick: requestClose,
+    },
+  ];
+
+  const handleTitleBarContextMenu = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openMenu(e.clientX, e.clientY, titleBarMenu, e.currentTarget as HTMLElement);
+  };
+
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
     if (win.maximized || isMobile) return;
     if ((event.target as HTMLElement).closest("button")) return;
     const frame = frameRef.current;
@@ -83,7 +114,7 @@ export function Window({ win }: { win: WindowState }) {
   };
 
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
-    if (win.maximized || isMobile) return;
+    if (event.button !== 0 || win.maximized || isMobile) return;
     const frame = frameRef.current;
     if (!frame) return;
     event.preventDefault();
@@ -129,7 +160,7 @@ export function Window({ win }: { win: WindowState }) {
   return (
     <div
       ref={frameRef}
-      className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-background shadow-2xl transition-[opacity,transform] duration-150 ${
+      className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-background shadow-2xl transition-[opacity,transform] duration-150 motion-reduce:transition-none ${win.minimized ? "invisible" : ""} ${
         fullscreen
           ? "inset-x-0 top-0 bottom-[88px] rounded-none border-0"
           : "rounded-xl border"
@@ -146,13 +177,27 @@ export function Window({ win }: { win: WindowState }) {
             }
       }
       role="dialog"
+      aria-hidden={win.minimized || undefined}
       aria-label={win.title}
       onPointerDown={() => !closing && focus(win.id)}
     >
       <div
         className="relative flex h-10 shrink-0 items-center border-b bg-muted/50 px-3"
         onPointerDown={startDrag}
-        onDoubleClick={() => !isMobile && toggleMaximize(win.id)}
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement).closest("button")) return;
+          if (!isMobile) toggleMaximize(win.id);
+        }}
+        onContextMenu={handleTitleBarContextMenu}
+        tabIndex={0}
+        aria-label={`${win.title} 标题栏`}
+        onKeyDown={(event) => {
+          if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const rect = event.currentTarget.getBoundingClientRect();
+          openMenu(rect.left, rect.bottom, titleBarMenu, event.currentTarget);
+        }}
       >
         <div className="group flex items-center gap-0.5" aria-label="窗口控制">
           <button
@@ -206,7 +251,7 @@ export function Window({ win }: { win: WindowState }) {
 export function WindowLayer() {
   const { windows } = useWindowManager();
   return (
-    <div className="pointer-events-none fixed inset-0">
+    <div className="pointer-events-none fixed inset-0 isolate z-10">
       {windows.map((win) => (
         <Window key={win.id} win={win} />
       ))}

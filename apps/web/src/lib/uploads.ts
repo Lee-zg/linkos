@@ -1,7 +1,12 @@
-import type { UploadCompleteResult, UploadSession } from "@linkos/protocol";
+import type {
+  ResourceRecord,
+  UploadCompleteResult,
+  UploadSession,
+} from "@linkos/protocol";
 import { sha256 } from "js-sha256";
-import { ApiError, getSessionToken } from "./api";
+import { ApiError, apiURL, getSessionToken } from "./api";
 import { evictCachedHash, getCachedHash, setCachedHash } from "./hashCache";
+import { loadProfile } from "./session";
 
 const DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024;
 const CONCURRENCY = 4;
@@ -18,16 +23,48 @@ export interface UploadProgress {
   totalBytes: number;
 }
 
+export interface UploadScope {
+  readonly gatewayBase: string;
+  readonly workspaceId: string;
+  readonly userId: string;
+}
+
+/** History can include unscoped legacy CAS records without a directory entry. */
 export interface UploadedFileRecord {
   name: string;
   size: number;
   mimeType: string;
+  entryId?: string;
   resourceId: string;
-  contentHash: string;
+  contentHash?: string;
   uploadedAt: string;
+  scope?: UploadScope;
+  legacy?: boolean;
 }
 
-export function loadUploadedFiles(): UploadedFileRecord[] {
+export interface UploadedEntryRecord extends UploadedFileRecord {
+  entryId: string;
+  scope: UploadScope;
+}
+
+function currentScope(): UploadScope {
+  const profile = loadProfile();
+  return Object.freeze({
+    gatewayBase: apiURL("") || window.location.origin,
+    workspaceId: profile?.workspaceId ?? "unknown",
+    userId: profile?.userId ?? "anonymous",
+  });
+}
+
+function sameScope(a: UploadScope | undefined, b: UploadScope): boolean {
+  return (
+    a?.gatewayBase === b.gatewayBase &&
+    a.workspaceId === b.workspaceId &&
+    a.userId === b.userId
+  );
+}
+
+function readUploadedFiles(): UploadedFileRecord[] {
   try {
     const raw = localStorage.getItem(RECORDS_KEY);
     return raw ? (JSON.parse(raw) as UploadedFileRecord[]) : [];
@@ -36,16 +73,28 @@ export function loadUploadedFiles(): UploadedFileRecord[] {
   }
 }
 
-function saveUploadedFiles(records: UploadedFileRecord[]) {
-  localStorage.setItem(RECORDS_KEY, JSON.stringify(records.slice(0, 100)));
+/** Legacy rows remain visible, explicitly marked; scoped rows never cross users. */
+export function loadUploadedFiles(): UploadedFileRecord[] {
+  const scope = currentScope();
+  return readUploadedFiles()
+    .filter((item) => !item.scope || sameScope(item.scope, scope))
+    .map((item) => ({ ...item, legacy: !item.scope || !item.entryId }));
 }
 
-export function rememberUploadedFile(record: UploadedFileRecord) {
-  const records = loadUploadedFiles().filter(
-    (item) => item.contentHash !== record.contentHash,
+export function rememberUploadedFile(
+  record: UploadedFileRecord & { entryId: string },
+) {
+  const scope = record.scope ?? currentScope();
+  const records = readUploadedFiles().filter(
+    (item) => !sameScope(item.scope, scope) || item.entryId !== record.entryId,
   );
-  records.unshift(record);
-  saveUploadedFiles(records);
+  records.unshift({ ...record, scope });
+  let scopedCount = 0;
+  // Bound only this scope, without destroying other users' or legacy history.
+  const retained = records.filter(
+    (item) => !sameScope(item.scope, scope) || ++scopedCount <= 100,
+  );
+  localStorage.setItem(RECORDS_KEY, JSON.stringify(retained));
 }
 
 function loadSessionIndex(): Record<string, string> {
@@ -61,7 +110,19 @@ function saveSessionIndex(index: Record<string, string>) {
   localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(index));
 }
 
-function authHeaders(): HeadersInit {
+function rememberSession(key: string, uploadId: string) {
+  saveSessionIndex({ ...loadSessionIndex(), [key]: uploadId });
+}
+
+function forgetSession(key: string, uploadId: string) {
+  const index = loadSessionIndex();
+  // A simultaneous operation may have installed a newer session for this key.
+  if (index[key] !== uploadId) return;
+  delete index[key];
+  saveSessionIndex(index);
+}
+
+function authHeaders(): Record<string, string> {
   const token = getSessionToken();
   if (!token) {
     throw new ApiError(401, "会话不存在，请重新进入工作区");
@@ -71,8 +132,7 @@ function authHeaders(): HeadersInit {
 
 async function parseError(response: Response): Promise<ApiError> {
   const payload = (await response.json().catch(() => undefined)) as
-    | { error?: string; message?: string }
-    | undefined;
+    { error?: string; message?: string } | undefined;
   return new ApiError(
     response.status,
     payload?.message ?? payload?.error ?? `请求失败（${response.status}）`,
@@ -90,15 +150,14 @@ function sha256Hex(data: ArrayBuffer): string {
  */
 async function streamFileHash(
   file: File,
+  size: number,
   windowSize: number,
   onProgress: (hashedBytes: number) => void,
 ): Promise<string> {
   const hasher = sha256.create();
   let offset = 0;
-  while (offset < file.size) {
-    const window = await file
-      .slice(offset, offset + windowSize)
-      .arrayBuffer();
+  while (offset < size) {
+    const window = await file.slice(offset, offset + windowSize).arrayBuffer();
     hasher.update(window);
     offset += window.byteLength;
     onProgress(offset);
@@ -106,8 +165,25 @@ async function streamFileHash(
   return hasher.hex();
 }
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+interface UploadContext {
+  readonly scope: UploadScope;
+  readonly headers: Record<string, string>;
+  readonly parentId: string;
+  readonly name: string;
+  readonly size: number;
+  readonly lastModified: number;
+  readonly mimeType: string;
+}
+
+async function fetchJson<T>(
+  context: UploadContext,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const response = await fetch(`${context.scope.gatewayBase}${path}`, {
+    ...init,
+    headers: { ...context.headers, ...init?.headers },
+  });
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -126,12 +202,27 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
  * A cached hash can be stale if the content changed without bumping
  * `lastModified`; the server rejects the mismatched hash at completion, so we
  * evict the entry, recompute from the real bytes, and retry once.
+ *
+ * The resume index is isolated per gateway/workspace/user/directory to avoid
+ * cross-contamination between different contexts or users.
  */
 export async function uploadFile(
   file: File,
+  parentId: string,
   onProgress: (progress: UploadProgress) => void,
   chunkSize = DEFAULT_CHUNK_SIZE,
-): Promise<UploadedFileRecord> {
+): Promise<UploadedEntryRecord> {
+  // Capture even before the first progress callback or hash await. All requests
+  // (including a stale-cache retry) keep this gateway, credential and identity.
+  const context: UploadContext = Object.freeze({
+    scope: currentScope(),
+    headers: authHeaders(),
+    parentId,
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+    mimeType: file.type || "application/octet-stream",
+  });
   const reportHashing = (hashedBytes: number) =>
     onProgress({
       phase: "hashing",
@@ -139,32 +230,39 @@ export async function uploadFile(
       sentParts: 0,
       totalParts: 0,
       sentBytes: 0,
-      totalBytes: file.size,
+      totalBytes: context.size,
     });
 
-  const cached = getCachedHash(localStorage, file);
+  const cached = getCachedHash(localStorage, context);
   let contentHash: string;
-  let fromCache: boolean;
   if (cached !== null) {
     contentHash = cached;
-    fromCache = true;
-    reportHashing(file.size);
+    reportHashing(context.size);
   } else {
-    fromCache = false;
     reportHashing(0);
-    contentHash = await streamFileHash(file, chunkSize, reportHashing);
-    setCachedHash(localStorage, file, contentHash);
+    contentHash = await streamFileHash(
+      file,
+      context.size,
+      chunkSize,
+      reportHashing,
+    );
+    setCachedHash(localStorage, context, contentHash);
   }
 
   try {
-    return await runUpload(file, contentHash, onProgress, chunkSize);
+    return await runUpload(file, context, contentHash, onProgress, chunkSize);
   } catch (error) {
-    if (!fromCache || !isHashMismatch(error)) throw error;
-    evictCachedHash(localStorage, file);
+    if (cached === null || !isHashMismatch(error)) throw error;
+    evictCachedHash(localStorage, context);
     reportHashing(0);
-    contentHash = await streamFileHash(file, chunkSize, reportHashing);
-    setCachedHash(localStorage, file, contentHash);
-    return await runUpload(file, contentHash, onProgress, chunkSize);
+    contentHash = await streamFileHash(
+      file,
+      context.size,
+      chunkSize,
+      reportHashing,
+    );
+    setCachedHash(localStorage, context, contentHash);
+    return await runUpload(file, context, contentHash, onProgress, chunkSize);
   }
 }
 
@@ -178,45 +276,80 @@ function isHashMismatch(error: unknown): boolean {
 
 async function runUpload(
   file: File,
+  context: UploadContext,
   contentHash: string,
   onProgress: (progress: UploadProgress) => void,
-  chunkSize: number,
-): Promise<UploadedFileRecord> {
-  const totalParts = Math.max(1, Math.ceil(file.size / chunkSize));
+  requestedChunkSize: number,
+): Promise<UploadedEntryRecord> {
+  const { scope, parentId, name, size, mimeType } = context;
+  // Tuple encoding avoids delimiter collisions in names and context IDs.
+  const resumeKey = JSON.stringify([
+    scope.gatewayBase,
+    scope.workspaceId,
+    scope.userId,
+    parentId,
+    name,
+    size,
+    contentHash,
+  ]);
+  let session = await tryResume(context, loadSessionIndex()[resumeKey]);
 
-  const index = loadSessionIndex();
-  const resumeKey = `${file.name}:${file.size}:${contentHash}`;
-  let session = await tryResume(index[resumeKey]);
   if (!session) {
-    session = await fetchJson<UploadSession>("/api/v1/uploads", {
+    session = await fetchJson<UploadSession>(context, "/api/v1/uploads", {
       method: "POST",
-      headers: { ...authHeaders(), "content-type": "application/json" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        name: file.name,
-        size: file.size,
-        mimeType: file.type || "application/octet-stream",
+        name,
+        size,
+        mimeType,
         contentHash,
-        chunkSize,
+        chunkSize: requestedChunkSize,
+        parentId,
       }),
     });
-    index[resumeKey] = session.id;
-    saveSessionIndex(index);
+    rememberSession(resumeKey, session.id);
+  }
+
+  const { chunkSize, totalParts } = session;
+  // If completion's response was lost, verify the entry still exists and use
+  // its current name. A missing/deleted entry must never start another upload.
+  if (session.status === "completed") {
+    const entryId = requireEntryId(session.entryId);
+    const entry = await completedEntry(context, entryId);
+    onProgress({
+      phase: "finalizing",
+      hashedBytes: size,
+      sentParts: totalParts,
+      totalParts,
+      sentBytes: size,
+      totalBytes: size,
+    });
+    forgetSession(resumeKey, session.id);
+    return {
+      name: entry.name,
+      size,
+      mimeType,
+      entryId,
+      resourceId: session.resourceId ?? "",
+      uploadedAt: new Date().toISOString(),
+      scope,
+    };
   }
 
   const received = new Set(session.receivedParts);
   let sentParts = received.size;
   let sentBytes = 0;
   for (const partNo of received) {
-    sentBytes += partSize(file.size, chunkSize, totalParts, partNo);
+    sentBytes += partSize(size, chunkSize, totalParts, partNo);
   }
   const report = () =>
     onProgress({
       phase: "uploading",
-      hashedBytes: file.size,
+      hashedBytes: size,
       sentParts,
       totalParts,
       sentBytes,
-      totalBytes: file.size,
+      totalBytes: size,
     });
   report();
 
@@ -225,62 +358,116 @@ async function runUpload(
     if (!received.has(partNo)) pending.push(partNo);
   }
   await runPool(pending, async (partNo) => {
-    const size = partSize(file.size, chunkSize, totalParts, partNo);
+    const bytes = partSize(size, chunkSize, totalParts, partNo);
     const chunk = await file
-      .slice(partNo * chunkSize, partNo * chunkSize + size)
+      .slice(partNo * chunkSize, partNo * chunkSize + bytes)
       .arrayBuffer();
     const partHash = sha256Hex(chunk);
-    await sendPart(session.id, partNo, chunk, partHash);
+    await sendPart(context, session.id, partNo, chunk, partHash);
     sentParts += 1;
-    sentBytes += size;
+    sentBytes += bytes;
     report();
   });
 
   onProgress({
     phase: "finalizing",
-    hashedBytes: file.size,
+    hashedBytes: size,
     sentParts,
     totalParts,
     sentBytes,
-    totalBytes: file.size,
+    totalBytes: size,
   });
   const result = await fetchJson<UploadCompleteResult>(
-    `/api/v1/uploads/${session.id}/complete`,
+    context,
+    `/api/v1/uploads/${encodeURIComponent(session.id)}/complete`,
     {
       method: "POST",
-      headers: { ...authHeaders(), "content-type": "application/json" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ contentHash }),
     },
   );
-  delete index[resumeKey];
-  saveSessionIndex(index);
+  const entryId = requireEntryId(result.entryId);
+  const finalName =
+    result.name ||
+    result.finalName ||
+    (await completedEntry(context, entryId)).name;
+  forgetSession(resumeKey, session.id);
   return {
-    name: file.name,
-    size: file.size,
-    mimeType: file.type || "application/octet-stream",
+    name: finalName,
+    size,
+    mimeType,
+    entryId,
     resourceId: result.resourceId,
-    contentHash,
     uploadedAt: new Date().toISOString(),
+    scope,
   };
 }
 
-async function tryResume(uploadId?: string): Promise<UploadSession | null> {
-  if (!uploadId) return null;
-  try {
-    const session = await fetchJson<UploadSession>(
-      `/api/v1/uploads/${uploadId}`,
-      { headers: authHeaders() },
+function requireEntryId(entryId?: string): string {
+  if (!entryId) {
+    throw new ApiError(
+      409,
+      "上传会话已完成但缺少目录项标识",
+      "UPLOAD_ENTRY_MISSING",
     );
-    if (session.status === "created" || session.status === "uploading") {
-      return session;
+  }
+  return entryId;
+}
+
+async function completedEntry(
+  context: UploadContext,
+  entryId: string,
+): Promise<ResourceRecord> {
+  try {
+    return await fetchJson<ResourceRecord>(
+      context,
+      `/api/v1/resources/${encodeURIComponent(entryId)}`,
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      throw new ApiError(
+        404,
+        "上传已完成，但目录项已删除或不存在，无法恢复",
+        "UPLOAD_ENTRY_DELETED",
+      );
     }
-    return null;
-  } catch {
-    return null;
+    throw error;
   }
 }
 
+async function tryResume(
+  context: UploadContext,
+  uploadId?: string,
+): Promise<UploadSession | null> {
+  if (!uploadId) return null;
+  let session: UploadSession;
+  try {
+    session = await fetchJson<UploadSession>(
+      context,
+      `/api/v1/uploads/${encodeURIComponent(uploadId)}`,
+    );
+  } catch (error) {
+    // Only the session endpoint's 404 permits a replacement. Keep the pointer
+    // on auth/network errors, including errors while verifying a completed entry.
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
+  if (
+    session.status === "completed" ||
+    session.status === "created" ||
+    session.status === "uploading"
+  ) {
+    return session;
+  }
+  throw new ApiError(
+    409,
+    `上传会话状态为 ${session.status}，无法继续上传`,
+    "UPLOAD_NOT_RESUMABLE",
+  );
+}
+
 async function sendPart(
+  context: UploadContext,
   uploadId: string,
   partNo: number,
   chunk: ArrayBuffer,
@@ -289,11 +476,15 @@ async function sendPart(
   let lastError: unknown = null;
   for (let attempt = 0; attempt <= PART_RETRIES; attempt++) {
     try {
-      await fetchJson(`/api/v1/uploads/${uploadId}/parts/${partNo}`, {
-        method: "PATCH",
-        headers: { ...authHeaders(), "x-part-sha256": partHash },
-        body: new Blob([chunk]),
-      });
+      await fetchJson(
+        context,
+        `/api/v1/uploads/${encodeURIComponent(uploadId)}/parts/${partNo}`,
+        {
+          method: "PATCH",
+          headers: { "x-part-sha256": partHash },
+          body: new Blob([chunk]),
+        },
+      );
       return;
     } catch (error) {
       lastError = error;
@@ -332,13 +523,13 @@ function partSize(
   return chunkSize;
 }
 
-/** Downloads a content-addressed resource and saves it under its file name. */
+/** Pass an entryId for new files; CAS resourceIds are only for legacy history. */
 export async function downloadResource(
   resourceId: string,
   name: string,
 ): Promise<void> {
   const response = await fetch(
-    `/api/v1/files/${encodeURIComponent(resourceId)}/content`,
+    apiURL(`/api/v1/files/${encodeURIComponent(resourceId)}/content`),
     { headers: authHeaders() },
   );
   if (!response.ok) {

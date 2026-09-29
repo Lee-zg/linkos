@@ -1,0 +1,441 @@
+{
+  "skill": "audit",
+  "project_name": "LinkOS",
+  "status": "audit-and-proposal-only",
+  "target": {
+    "type": "code",
+    "reference": "D:/GitProject/GitHub/linkos",
+    "pages_audited": [
+      "接入页",
+      "桌面与 Dock",
+      "文件",
+      "聊天",
+      "代码",
+      "任务",
+      "管理后台",
+      "应用管理",
+      "设置"
+    ]
+  },
+  "audit_framework": [
+    "Nielsen-10",
+    "responsive",
+    "performance"
+  ],
+  "scope": {
+    "primary_scenario": "团队日常协作，兼顾研发与内网管理",
+    "decision_basis": "用户未指定优先场景；沿用 PRD 的局域网团队定位，不视为用户已批准改版设计",
+    "method": "当前工作树源码走查 + 隔离网关 + Chromium 桌面/移动视口验证",
+    "limitations": [
+      "没有真实用户访谈、使用频率、转化率或生产性能基线",
+      "移动端为 390×844 视口模拟，不等同真机触控验收",
+      "未启动容器 Runner，任务执行和产物端到端链路未实测",
+      "未进行生产签名插件安装、真实设备吊销或完整 WCAG 审计",
+      "已保留现有未提交修改；旧知识卡片和进度文档与当前源码有差异，以源码为准",
+      "所有写入业务数据的实验只在本轮隔离的内存网关中进行，未修改真实团队数据"
+    ]
+  },
+  "evidence_file": "spark-output/audit/evidence/browser-results.json",
+  "findings": [
+    {
+      "id": "audit-01",
+      "heuristic": "error-prevention",
+      "severity": "blocker",
+      "priority": "P0",
+      "validation": "browser-confirmed",
+      "description": "超过 2000 行且小于 5 MiB 的代码文件只加载前 2000 行，却继续允许整文件保存。临时测试文件从 2105 行变为 2000 行，新版本缺失尾部 105 行。",
+      "evidence": "services/gateway/mvp_store.go:1397-1411、1421-1452；apps/web/src/apps/CodeApp.tsx:25-37、72-77；browser-results.json: truncated-code-save；截图 07-truncated-file-editable.png",
+      "suggestion": "立即阻止未加载全文的覆盖保存并显示截断原因；随后补齐全文加载/分页编辑策略，验证保存前后尾部内容和版本可恢复性。不得把已有版本历史当作允许静默截断的理由。",
+      "effort": "medium",
+      "exposure": "打开长文件并修改保存时"
+    },
+    {
+      "id": "audit-02",
+      "heuristic": "recognition",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "browser-confirmed",
+      "description": "共享目录展示硬编码样例；最近文件来自本浏览器 localStorage。成员 A 上传成功后，成员 B 的文件页仍为空，上传与团队共享脱节。",
+      "evidence": "apps/web/src/apps/FilesApp.tsx:23-47、74-98；apps/web/src/lib/uploads.ts:9-48；browser-results.json: shared-directory、other-member-file-discovery；截图 03/04/05",
+      "suggestion": "用受工作区权限约束的服务端资源索引驱动共享目录；上传完成后可发送文件卡片到频道，收件人能发现并下载。过渡阶段明确区分本机上传记录与团队文件，不展示假共享数据。",
+      "effort": "major-rework",
+      "exposure": "每次跨成员发现文件时"
+    },
+    {
+      "id": "audit-03",
+      "heuristic": "responsive",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "browser-confirmed",
+      "description": "小屏聊天隐藏频道列表，没有替代频道切换入口；代码应用的文件树采用同样隐藏方式。移动用户无法完成完整导航。",
+      "evidence": "apps/web/src/apps/ChatApp.tsx:90-98；apps/web/src/apps/CodeApp.tsx:101-107；browser-results.json: mobile-390（聊天实测，代码静态确认）；截图 06-mobile-chat.png",
+      "suggestion": "手机聊天标题提供频道选择抽屉，代码查看提供文件选择器；切换后保留当前频道/文件位置，覆盖 320、390、768px 及横屏。",
+      "effort": "medium",
+      "exposure": "小于 640px 使用多个频道/文件时"
+    },
+    {
+      "id": "audit-04",
+      "heuristic": "responsive",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "browser-confirmed",
+      "description": "管理员 Dock 实测宽 501px，在 390px 屏幕左右各溢出 55.5px；应用与退出入口不可完整展示，窗口控制仍使用 28px 点击目标。",
+      "evidence": "apps/web/src/os/Dock.tsx:11-48；apps/web/src/os/Window.tsx:157-185；browser-results.json: mobile-390；截图 06-mobile-chat.png",
+      "suggestion": "手机采用工作台/聊天/文件/更多四入口，研发与管理收纳到更多；触摸目标至少 44px，保留明确的返回路径，不直接压缩桌面 Dock。",
+      "effort": "medium",
+      "exposure": "手机端，管理员导航尤为明显"
+    },
+    {
+      "id": "audit-05",
+      "heuristic": "visibility",
+      "severity": "major",
+      "priority": "P0",
+      "validation": "browser-confirmed",
+      "description": "诊断包按钮只提示已准备好下载，没有生成或下载；通知开关关闭后重开设置即恢复开启，随系统启动也仅为组件状态。界面承诺与实际效果不一致。",
+      "evidence": "apps/web/src/apps/SettingsApp.tsx:62-63、107-125、154-165；browser-results.json: settings；截图 02-settings-diagnostic.png",
+      "suggestion": "未实现能力标为暂不可用并解释原因，禁止成功提示；需要交付的通知设置应真实影响通知且持久化。诊断包只有实际生成后才提供下载，并说明内容与隐私范围。",
+      "effort": "quick-win",
+      "exposure": "每次使用这些设置时"
+    },
+    {
+      "id": "audit-06",
+      "heuristic": "user-control",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "browser-confirmed",
+      "description": "聊天未发送草稿在关闭窗口后丢失，再打开为空；窗口关闭没有保存提示。",
+      "evidence": "apps/web/src/apps/ChatApp.tsx:17；apps/web/src/os/window-manager.tsx:73-74；browser-results.json: chat",
+      "suggestion": "以工作区、用户、频道及线程为键保存草稿；发送成功才清除，关闭/刷新后可恢复，退出账号时明确本地草稿处理策略。",
+      "effort": "medium",
+      "exposure": "有未发送内容时关闭窗口或刷新"
+    },
+    {
+      "id": "audit-07",
+      "heuristic": "user-control",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "传输队列只有进度/错误文本，没有暂停、取消或原位重试；队列存于文件窗口组件，关闭窗口后失去可见控制面板。底层已有断点续传，不等于用户拥有续传入口。",
+      "evidence": "apps/web/src/apps/FilesApp.tsx:77、100-141、174-220；apps/web/src/os/window-manager.tsx:73-74",
+      "suggestion": "先提供可恢复的失败行、重新选择原文件继续上传和明确取消；传输状态提升到工作区级，关窗不隐藏后台任务状态，暂停需在底层支持后再承诺。",
+      "effort": "medium",
+      "exposure": "长传输、失败或关闭文件窗口时"
+    },
+    {
+      "id": "audit-08",
+      "heuristic": "error-recovery",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "离线页填写非法网关地址时会设置 error，但错误区域仅在 policy 存在的登录分支渲染，因此用户无法看到地址校验错误；手动地址输入也只在离线阶段提供。",
+      "evidence": "apps/web/src/gate/AccessGate.tsx:209-221、261、345-350",
+      "suggestion": "将连接错误就地显示在地址输入旁，提供重试与切换工作区；把地址、网络不可达、需要 HTTPS、会话失效分开解释。",
+      "effort": "quick-win",
+      "exposure": "首次接入或网关地址错误时"
+    },
+    {
+      "id": "audit-09",
+      "heuristic": "consistency",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "代码页运行按钮不检查未保存草稿，也不绑定当前编辑版本，直接提交默认项目的 go test ./...；用户容易把服务器旧代码的结果理解为当前修改的验证结果。",
+      "evidence": "apps/web/src/apps/CodeApp.tsx:72-77、114；apps/web/src/lib/workspace.tsx:173-187",
+      "suggestion": "提供保存并运行，提交前确认项目、命令、代码版本和执行节点；任务详情显示提交时的版本，结果可返回对应文件。",
+      "effort": "medium",
+      "exposure": "修改未保存代码后点击运行时"
+    },
+    {
+      "id": "audit-10",
+      "heuristic": "visibility",
+      "severity": "major",
+      "priority": "P0",
+      "validation": "code-confirmed",
+      "description": "任何 job.status.changed 事件都会覆盖当前 jobStatus，没有校验任务 ID；多成员同时运行时，别人的终态可能让当前任务显示错误状态并停止轮询。",
+      "evidence": "apps/web/src/lib/workspace.tsx:122-130、144-148",
+      "suggestion": "按任务 ID 隔离状态，只有匹配当前任务的事件更新当前视图；补双用户、双任务交错事件回归，并保留未知事件的补取能力。",
+      "effort": "medium",
+      "exposure": "多个任务事件交错时；尚未运行多 Runner 实测"
+    },
+    {
+      "id": "audit-11",
+      "heuristic": "error-recovery",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "任务产物使用裸相对链接下载，而资源下载端点需要会话鉴权。与文件页的带鉴权下载链路不一致，独立网关地址也无法被此链接继承。",
+      "evidence": "apps/web/src/apps/TasksApp.tsx:72；apps/web/src/lib/uploads.ts:336-342；services/gateway/main.go:423",
+      "suggestion": "统一带鉴权和网关地址的资源下载入口，错误留在当前任务并允许重试；在真实容器产物上完成验收，不以产物列表出现作为闭环成功。",
+      "effort": "medium",
+      "exposure": "下载任务产物时；Runner 端到端未实测"
+    },
+    {
+      "id": "audit-12",
+      "heuristic": "error-prevention",
+      "severity": "major",
+      "priority": "P0",
+      "validation": "code-confirmed",
+      "description": "设备吊销按钮单击执行，没有影响说明、二次确认、进行中状态或错误反馈，容易误断开成员会话。",
+      "evidence": "apps/web/src/apps/AdminApp.tsx:330",
+      "suggestion": "展示成员、设备、最近活跃与是否当前设备；确认后操作并反馈结果，防止重复提交；不要提供后端不支持的虚假撤销。",
+      "effort": "quick-win",
+      "exposure": "管理员管理设备时；未实际吊销设备"
+    },
+    {
+      "id": "audit-13",
+      "heuristic": "error-recovery",
+      "severity": "major",
+      "priority": "P2",
+      "validation": "code-confirmed",
+      "description": "插件安装界面只读取 manifest，API 默认发送空 signature；在要求可信签名的生产模式下，这个入口无法完成受信安装。沙箱预览也仅展示握手样例，并非真实插件 UI。",
+      "evidence": "apps/web/src/apps/PluginsApp.tsx:26-31；apps/web/src/lib/api.ts:367-368；services/gateway/main.go:391-392；apps/web/src/apps/PluginFrame.tsx:17、27、37",
+      "suggestion": "先明确区分连通性演示与可用插件；后续导入签名包并解释信任校验结果，验证真实 UI 加载及回滚。不得通过降低签名要求绕过安装问题。",
+      "effort": "major-rework",
+      "exposure": "生产安装与插件验收时"
+    },
+    {
+      "id": "audit-14",
+      "heuristic": "visibility",
+      "severity": "major",
+      "priority": "P0",
+      "validation": "code-confirmed",
+      "description": "工作台挂载时无条件显示已连接 Nimbus Lab，未等待 WebSocket 就绪；连接状态实际只在 Dock 小圆点表达，可能出现成功提示与离线状态冲突。",
+      "evidence": "apps/web/src/App.tsx:14-21；apps/web/src/os/Dock.tsx:13-18",
+      "suggestion": "只在真实连接完成后提示成功；在工作区级显示正在连接、在线、重连中、离线和数据更新时间，避免每个模块重复堆叠状态。",
+      "effort": "quick-win",
+      "exposure": "进入工作台及连接恢复时"
+    },
+    {
+      "id": "audit-15",
+      "heuristic": "visibility",
+      "severity": "minor",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "哈希阶段百分比仍按已发送分片计算，totalParts 为零时一直显示 0%；用户虽然看到已校验字节数，但进度条与阶段进度不匹配。",
+      "evidence": "apps/web/src/apps/FilesApp.tsx:103-107、119-135；apps/web/src/lib/uploads.ts:135-140",
+      "suggestion": "分阶段计算校验和传输进度，合并阶段标为处理中；避免已上传 100% 被理解成文件已经可下载。",
+      "effort": "quick-win",
+      "exposure": "首次上传较大文件进行哈希时"
+    },
+    {
+      "id": "audit-16",
+      "heuristic": "real-world-match",
+      "severity": "minor",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "普通协作者被直接暴露 Gateway、8 MiB/4 路并发、sha256、guest/member/admin、devices 等实现术语，重要的共享对象、访问权限和下一步反而不明确。",
+      "evidence": "apps/web/src/gate/AccessGate.tsx:213-215；apps/web/src/apps/FilesApp.tsx:151、279；apps/web/src/apps/AdminApp.tsx:329",
+      "suggestion": "默认使用工作区地址、自动续传、访客/成员/管理员等任务语言，哈希/分片/原始角色 ID 收入详情，保留技术用户排错入口。",
+      "effort": "quick-win",
+      "exposure": "接入、传输和权限管理常规流程"
+    },
+    {
+      "id": "audit-17",
+      "heuristic": "aesthetic",
+      "severity": "minor",
+      "priority": "P2",
+      "validation": "heuristic-observation",
+      "description": "桌面大部分用于壁纸，顶部图标与 Dock 重复列出应用，没有协作内容或明确的首次任务入口。视觉有辨识度，但组织方式围绕应用而非正在进行的协作。",
+      "evidence": "apps/web/src/os/Desktop.tsx:16-44；apps/web/src/os/Dock.tsx:20-41；截图 01-desktop.png",
+      "suggestion": "保留现有桌面品牌与多窗口能力，默认增加轻量工作台：未读、最近共享、进行中的任务，主操作是发消息、传文件和继续处理；不先做全量视觉重构。",
+      "effort": "medium",
+      "exposure": "每次进入工作台；任务效率影响需用户测试验证"
+    },
+    {
+      "id": "audit-18",
+      "heuristic": "help-docs",
+      "severity": "minor",
+      "priority": "P1",
+      "validation": "heuristic-observation",
+      "description": "新用户从显示名、邀请码、管理员口令直接进入应用图标桌面；这些主入口没有解释身份差异、下一步可做什么、如何请同事加入。仓库有文档，但不等同于产品内帮助。",
+      "evidence": "apps/web/src/gate/AccessGate.tsx:261-339；apps/web/src/os/Desktop.tsx:16-44；docs/prd/linkos-lan-collaboration-prd.md:73-86",
+      "suggestion": "提供可跳过的首次成功引导：确认工作区与身份、进入频道、分享一个文件；错误页面就地给下一步，不做强制教程或独立庞大帮助中心。",
+      "effort": "medium",
+      "exposure": "首次接入、邀请新成员时"
+    },
+    {
+      "id": "audit-19",
+      "heuristic": "flexibility",
+      "severity": "minor",
+      "priority": "P2",
+      "validation": "code-confirmed",
+      "description": "窗口状态仅保存在 reducer，刷新重新回桌面；没有与 URL 对应的当前频道、文件或任务位置，不能通过浏览器历史返回同一协作上下文。",
+      "evidence": "apps/web/src/os/window-manager.tsx:25-97、113-121；apps/web/src/App.tsx:22-28",
+      "suggestion": "为频道/文件/任务提供稳定的应用内深链接，支持权限校验、刷新恢复和返回；先覆盖核心资源，不必一次持久化所有窗口尺寸和位置。",
+      "effort": "medium",
+      "exposure": "刷新、分享上下文、浏览器返回时"
+    },
+    {
+      "id": "audit-20",
+      "heuristic": "performance",
+      "severity": "minor",
+      "priority": "P2",
+      "validation": "unmeasured-risk",
+      "description": "首次大文件上传在主线程循环做同步增量哈希；缓存已优化重复上传，但弱设备首次上传仍有交互卡顿风险。本轮没有测得生产 LCP/INP 或吞吐，不能认定已不达标。",
+      "evidence": "apps/web/src/lib/uploads.ts:91-106；apps/web/src/lib/hashCache.ts（已有缓存能力）",
+      "suggestion": "先测首次 1GiB 上传并同时聊天、滚动的交互延迟与内存；确有长任务后引入 Worker 和进度节流，保留已有流式读取和哈希缓存。",
+      "effort": "medium",
+      "exposure": "首次大文件、低配置设备；待压测"
+    },
+    {
+      "id": "audit-21",
+      "heuristic": "recognition",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "消息列表固定请求 limit=100，没有消费游标或加载更早消息的入口；普通浏览无法完整找回较早协作内容。",
+      "evidence": "apps/web/src/apps/ChatApp.tsx:23-30、101-108",
+      "suggestion": "提供向上加载历史、结果定位与返回当前讨论；区分加载失败、确实无消息和没有更多，保持滚动位置，不在每次增量消息时强制跳到底部。",
+      "effort": "medium",
+      "exposure": "频道超过一页消息、查历史时"
+    },
+    {
+      "id": "audit-22",
+      "heuristic": "consistency",
+      "severity": "minor",
+      "priority": "P0",
+      "validation": "code-confirmed",
+      "description": "Toast 统一渲染勾选图标，不区分成功、失败和警告；发送失败、安装失败等也使用相同视觉语义。",
+      "evidence": "apps/web/src/os/Toaster.tsx:11-14、43-56；apps/web/src/apps/ChatApp.tsx:63",
+      "suggestion": "统一成功、错误、警告、信息语义，失败提示包含原因与可执行下一步；颜色之外保留图标和文本差异，关键错误不只依赖 4 秒通知。",
+      "effort": "quick-win",
+      "exposure": "全局反馈，包括失败提示"
+    },
+    {
+      "id": "audit-23",
+      "heuristic": "error-prevention",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "聊天 Enter 提交未检查输入法组合态；也没有发送中锁，连续提交会生成不同 clientMsgId，存在中文候选确认误发送及重复消息风险。",
+      "evidence": "apps/web/src/apps/ChatApp.tsx:52-63、109",
+      "suggestion": "组合输入时不触发发送；明确发送中/失败状态，同一条发送重试复用稳定标识，并验证中文输入法、快速连击和慢网。",
+      "effort": "medium",
+      "exposure": "中文输入法确认、慢网重复点击；真机输入法未实测"
+    },
+    {
+      "id": "audit-24",
+      "heuristic": "error-recovery",
+      "severity": "major",
+      "priority": "P1",
+      "validation": "code-confirmed",
+      "description": "任务提交将所有异常吞掉返回 null，UI 统一提示 Runner 不可用，权限不足与网关故障会被误导为基础设施问题；任务入口也不解释当前角色能否运行。",
+      "evidence": "apps/web/src/lib/workspace.tsx:183-190；apps/web/src/apps/TasksApp.tsx:39-46、59",
+      "suggestion": "保留结构化错误，区分无权限、无执行节点、配额/排队与网络错误；分别提供申请权限、配置指引或重试，不能用隐藏按钮代替服务端权限校验。",
+      "effort": "medium",
+      "exposure": "访客运行、Runner 未配置、服务异常时"
+    }
+  ],
+  "opportunities": [
+    {
+      "title": "先保证数据与反馈可信",
+      "addresses_findings": [
+        "audit-01",
+        "audit-05",
+        "audit-10",
+        "audit-12",
+        "audit-14",
+        "audit-22"
+      ],
+      "priority": "high",
+      "rationale": "数据完整性与错误成功反馈必须先于扩展功能处理；截断保存已在隔离浏览器复现，不能带入团队试点。"
+    },
+    {
+      "title": "打通发出—接收—找回的协作闭环",
+      "addresses_findings": [
+        "audit-02",
+        "audit-06",
+        "audit-07",
+        "audit-15",
+        "audit-21",
+        "audit-23"
+      ],
+      "priority": "high",
+      "rationale": "这是 PRD 核心价值和默认迭代主线；单用户上传成功不等于团队能够共享和找回。"
+    },
+    {
+      "title": "让接入与手机导航可完成任务",
+      "addresses_findings": [
+        "audit-03",
+        "audit-04",
+        "audit-08",
+        "audit-16",
+        "audit-18"
+      ],
+      "priority": "high",
+      "rationale": "移动端缺失切换入口是可达性问题，不是视觉喜好；新成员需明确知道身份、位置与下一步。"
+    },
+    {
+      "title": "把桌面变成有上下文的工作台",
+      "addresses_findings": [
+        "audit-17",
+        "audit-19"
+      ],
+      "priority": "medium",
+      "rationale": "保留现有桌面辨识度，用最近协作、深链接和返回路径降低工具切换成本；不先整体重写外壳。"
+    },
+    {
+      "title": "闭合编辑—执行—交付结果",
+      "addresses_findings": [
+        "audit-09",
+        "audit-11",
+        "audit-24"
+      ],
+      "priority": "high",
+      "rationale": "现有 Runner、代码版本、任务取消都已有基础，应该修复版本关联、鉴权下载和错误解释，而非重新开发一套。"
+    },
+    {
+      "title": "有验证门槛的扩展与性能增强",
+      "addresses_findings": [
+        "audit-13",
+        "audit-20"
+      ],
+      "priority": "medium",
+      "rationale": "先证明签名包与真实插件可用，再扩生态；性能优化以测量为依据，保留已有缓存和流式传输。"
+    }
+  ],
+  "prioritization": {
+    "method": "先数据完整性与安全，再核心任务阻断，再发生范围与修复成本；严重度和触发条件为专家判断，不冒充用户频率或 RICE 数据。",
+    "next_backlog": [
+      "audit-01",
+      "audit-05",
+      "audit-10",
+      "audit-12",
+      "audit-14",
+      "audit-22",
+      "audit-02",
+      "audit-03",
+      "audit-04",
+      "audit-08"
+    ]
+  },
+  "generated_at": "2026-09-23T08:57:52.460Z",
+  "summary": {
+    "total_findings": 24,
+    "by_severity": {
+      "blocker": 1,
+      "major": 16,
+      "minor": 7
+    },
+    "by_heuristic": {
+      "visibility": 4,
+      "real-world-match": 1,
+      "user-control": 2,
+      "consistency": 2,
+      "error-prevention": 3,
+      "recognition": 2,
+      "flexibility": 1,
+      "aesthetic": 1,
+      "error-recovery": 4,
+      "help-docs": 1,
+      "responsive": 2,
+      "performance": 1
+    },
+    "top_opportunities": [
+      "先保证数据与反馈可信",
+      "打通发出—接收—找回的协作闭环",
+      "让接入与手机导航可完成任务",
+      "闭合编辑—执行—交付结果"
+    ]
+  }
+}

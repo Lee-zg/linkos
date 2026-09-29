@@ -1,15 +1,51 @@
-import { LogOut } from "lucide-react";
+import { LogOut, X, Minimize2 } from "lucide-react";
 import { visibleApps } from "./apps";
 import { AppIcon } from "./AppIcon";
 import { useWindowManager } from "./window-manager";
 import { useSession } from "../lib/session";
+import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
+import type { AppId } from "./types";
 
 export function Dock({ connected }: { connected: boolean }) {
-  const { windows, open, focus } = useWindowManager();
+  const { windows, open, focus, close, minimize } = useWindowManager();
   const { profile, exit } = useSession();
+  const { open: openMenu } = useContextMenu();
+
+  const createAppMenu = (appId: AppId, win: typeof windows[0] | undefined): ContextMenuItem[] => {
+    if (!win) {
+      return [
+        {
+          id: "open",
+          label: "打开",
+          onClick: () => open(appId),
+        },
+      ];
+    }
+
+    return [
+      {
+        id: "focus",
+        label: "显示窗口",
+        onClick: () => focus(win.id),
+      },
+      {
+        id: "minimize",
+        label: "最小化",
+        icon: <Minimize2 size={14} />,
+        onClick: () => minimize(win.id),
+      },
+      {
+        id: "close",
+        label: "关闭",
+        icon: <X size={14} />,
+        onClick: () => close(win.id),
+      },
+    ];
+  };
+
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-3 z-[9000] flex justify-center px-3">
-      <div className="pointer-events-auto flex items-end gap-1 rounded-2xl border border-border/50 bg-popover/60 px-3 py-2 shadow-lg backdrop-blur-xl">
+      <div className="pointer-events-auto flex max-w-full items-end gap-1 overflow-x-auto rounded-2xl border border-border/50 bg-popover/60 px-3 py-2 shadow-lg backdrop-blur-xl scrollbar-none">
         <span
           className="mr-1 mb-[7px] h-1.5 w-1.5 shrink-0 self-center rounded-full"
           style={{ background: connected ? "#22c55e" : "#a3a3a3" }}
@@ -19,6 +55,7 @@ export function Dock({ connected }: { connected: boolean }) {
         />
         {visibleApps(profile.role).map((app) => {
           const win = windows.find((w) => w.appId === app.id);
+          const appMenu = createAppMenu(app.id, win);
           return (
             <button
               key={app.id}
@@ -28,6 +65,18 @@ export function Dock({ connected }: { connected: boolean }) {
               onClick={() => {
                 if (!win) return open(app.id);
                 focus(win.id);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openMenu(e.clientX, e.clientY, appMenu, e.currentTarget);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const rect = event.currentTarget.getBoundingClientRect();
+                openMenu(rect.left, rect.top, appMenu, event.currentTarget);
               }}
             >
               <AppIcon app={app} size={40} />

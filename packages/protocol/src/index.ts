@@ -1,5 +1,6 @@
 export type ResourceType =
   | "workspace"
+  | "folder"
   | "file"
   | "chat.channel"
   | "chat.message"
@@ -127,9 +128,12 @@ export type ErrorCode =
   | "ACCESS_PENDING"
   | "ACCESS_REJECTED"
   | "ACCESS_REVOKED"
+  | "DEVICE_CHALLENGE_REQUIRED"
+  | "DEVICE_CHALLENGE_FAILED"
   | "RESOURCE_VERSION_MISMATCH"
   | "UPLOAD_PART_INVALID"
   | "QUOTA_EXCEEDED"
+  | "INSUFFICIENT_STORAGE"
   | "JOB_POLICY_DENIED"
   | "RUNNER_UNAVAILABLE"
   | "PLUGIN_INCOMPATIBLE"
@@ -196,6 +200,8 @@ export interface SessionCreateInput {
   deviceId?: string;
   publicKey?: string;
   inviteCode?: string;
+  challengeId?: string;
+  signature?: string;
 }
 
 export interface SessionToken {
@@ -290,6 +296,7 @@ export interface UploadCreateInput {
   mimeType?: string;
   contentHash?: string;
   chunkSize?: number;
+  parentId?: string;
 }
 
 export interface UploadSession {
@@ -302,6 +309,11 @@ export interface UploadSession {
   receivedParts: number[];
   status: UploadStatus;
   contentHash?: string;
+  parentId?: string;
+  ownerId?: string;
+  workspaceId?: string;
+  resourceId?: string;
+  entryId?: string;
 }
 
 export interface UploadPartInput {
@@ -325,6 +337,9 @@ export interface UploadCompleteResult {
   uploadId: string;
   resourceId: string;
   contentHash: string;
+  entryId?: string;
+  name?: string;
+  finalName?: string;
   status: "completed";
 }
 
@@ -512,4 +527,7 @@ export const EVENT_TYPES = {
   runnerUpdated: "runner.updated",
   pluginUpdated: "plugin.updated",
   codeVersionCreated: "code.version.created",
+  resourceCreated: "resource.created",
+  resourceUpdated: "resource.updated",
+  resourceDeleted: "resource.deleted",
 } as const;

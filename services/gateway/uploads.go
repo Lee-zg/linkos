@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -44,6 +46,10 @@ type uploadSession struct {
 	directory     string
 	resourceID    string
 	completedPath string
+	ownerID       string
+	workspaceID   string
+	parentID      string
+	entryID       string
 }
 
 type uploadStore struct {
@@ -54,6 +60,60 @@ type uploadStore struct {
 	content          *contentStore
 	maxFileSize      int64
 	maxActiveUploads int
+	auth             *authStore
+	committer        directoryCommitter
+	loadErr          error
+}
+
+type directoryCommitter interface {
+	commitUploadEntry(session *uploadSession, contentHash string) (entryID, finalName string, err error)
+}
+
+// Implementations acquire the MVP lock after the caller's uploads lock and must
+// never call back into uploadStore. Completion receives a private snapshot with
+// verified CAS fields and status "verifying". It atomically persists the entry
+// and completed snapshot through backend, then publishes MVP state and returns
+// the completed snapshot (including the final name). Errors publish neither.
+// A "completed" input is lookup-only: missing/deleted entries must not revive.
+// The old directoryCommitter alone is deliberately insufficient for HTTP use.
+type atomicDirectoryCommitter interface {
+	validateUploadTarget(authPrincipal, string) error
+	completeUploadEntry(authPrincipal, uploadSession, persistBackend) (uploadSession, error)
+}
+
+var (
+	errUploadTargetNotFound = errors.New("upload parent not found")
+	errUploadEntryNotFound  = errors.New("completed upload entry not found")
+	errUploadTargetInvalid  = errors.New("upload parent must be a folder")
+	errUploadForbidden      = errors.New("upload target permission denied")
+)
+
+func writeUploadCommitError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errUploadTargetNotFound):
+		writeAPIError(w, http.StatusNotFound, "PARENT_NOT_FOUND", err.Error())
+	case errors.Is(err, errUploadEntryNotFound):
+		writeAPIError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+	case errors.Is(err, errUploadTargetInvalid):
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+	case errors.Is(err, errUploadForbidden):
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+	default:
+		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not commit upload directory entry")
+	}
+}
+
+func (s *uploadStore) uploadPrincipal(w http.ResponseWriter, r *http.Request) (authPrincipal, bool) {
+	principal, ok := principalForRequest(s.auth, r)
+	if !ok || (s.auth != nil && (principal.UserID == "" || principal.WorkspaceID == "")) {
+		writeAPIError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "valid workspace session required")
+		return authPrincipal{}, false
+	}
+	if principal.Status != accessStatusActive || !roleAllows(principal.Role, "resource.write") {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "active resource.write permission required")
+		return authPrincipal{}, false
+	}
+	return principal, true
 }
 
 func defaultUploadRoot() string {
@@ -112,7 +172,7 @@ func newUploadStoreWithBackend(root string, backend persistBackend) *uploadStore
 	}
 	stored, err := backend.loadUploadSessions()
 	if err != nil {
-		log.Printf("load upload sessions: %v", err)
+		store.loadErr = fmt.Errorf("load upload sessions: %w", err)
 		return store
 	}
 	for i := range stored {
@@ -131,12 +191,10 @@ func newUploadStoreWithBackend(root string, backend persistBackend) *uploadStore
 	return store
 }
 
-// persistSession saves a snapshot outside the store mutex; failures are
-// logged and never block the upload path.
-func (s *uploadStore) persistSession(session uploadSession) {
-	if err := s.backend.saveUploadSession(session); err != nil {
-		log.Printf("persist upload %s: %v", session.id, err)
-	}
+// persistSessionLocked serializes every durable snapshot with state transitions.
+// Callers publish the candidate only after this succeeds.
+func (s *uploadStore) persistSessionLocked(session uploadSession) error {
+	return s.backend.saveUploadSession(session)
 }
 
 func cloneUploadSession(session *uploadSession) uploadSession {
@@ -149,6 +207,10 @@ func cloneUploadSession(session *uploadSession) uploadSession {
 }
 
 func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.uploadPrincipal(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method_not_allowed")
 		return
@@ -159,6 +221,9 @@ func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
 		MimeType    string `json:"mimeType"`
 		ContentHash string `json:"contentHash"`
 		ChunkSize   int64  `json:"chunkSize"`
+		ParentID    string `json:"parentId"`
+		OwnerID     string `json:"ownerId"`
+		WorkspaceID string `json:"workspaceId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid upload request")
@@ -169,12 +234,11 @@ func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "name and size are invalid")
 		return
 	}
+	if s.auth != nil {
+		input.OwnerID, input.WorkspaceID = principal.UserID, principal.WorkspaceID
+	}
 	if s.maxFileSize > 0 && input.Size > s.maxFileSize {
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "UPLOAD_TOO_LARGE", "file exceeds the upload size limit")
-		return
-	}
-	if s.activeSessionCount() >= s.maxActiveUploads {
-		writeAPIError(w, http.StatusTooManyRequests, "TOO_MANY_ACTIVE_UPLOADS", "too many uploads in progress, try again later")
 		return
 	}
 	chunkSize := input.ChunkSize
@@ -194,6 +258,23 @@ func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
 	if totalParts == 0 {
 		totalParts = 1
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeSessionCountLocked() >= s.maxActiveUploads {
+		writeAPIError(w, http.StatusTooManyRequests, "TOO_MANY_ACTIVE_UPLOADS", "too many uploads in progress, try again later")
+		return
+	}
+	if s.auth != nil || strings.TrimSpace(input.OwnerID) != "" {
+		committer, ok := s.committer.(atomicDirectoryCommitter)
+		if !ok {
+			writeAPIError(w, http.StatusServiceUnavailable, "INTERNAL_ERROR", "atomic upload directory committer unavailable")
+			return
+		}
+		if err := committer.validateUploadTarget(principal, strings.TrimSpace(input.ParentID)); err != nil {
+			writeUploadCommitError(w, err)
+			return
+		}
+	}
 	id := fmt.Sprintf("up_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&uploadIDSequence, 1))
 	directory := filepath.Join(s.root, id)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
@@ -211,30 +292,54 @@ func (s *uploadStore) handleCollection(w http.ResponseWriter, r *http.Request) {
 		contentHash: contentHash,
 		status:      "created",
 		directory:   directory,
+		ownerID:     strings.TrimSpace(input.OwnerID),
+		workspaceID: strings.TrimSpace(input.WorkspaceID),
+		parentID:    strings.TrimSpace(input.ParentID),
 	}
 	if session.mimeType == "" {
 		session.mimeType = "application/octet-stream"
 	}
-	s.mu.Lock()
+	if session.ownerID != "" {
+		var random [12]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create entry id")
+			_ = os.RemoveAll(directory)
+			return
+		}
+		session.entryID = "res_" + base64.RawURLEncoding.EncodeToString(random[:])
+	}
+	if err := s.persistSessionLocked(cloneUploadSession(session)); err != nil {
+		s.removeSessionDirectory(directory)
+		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not persist upload session")
+		return
+	}
 	s.sessions[id] = session
-	s.mu.Unlock()
-	s.persistSession(cloneUploadSession(session))
 	writeJSON(w, http.StatusCreated, uploadView(session))
 }
 
 func (s *uploadStore) handleItem(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.uploadPrincipal(w, r)
+	if !ok {
+		return
+	}
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/uploads/"), "/"), "/")
 	if len(parts) == 0 || !isSafeUploadID(parts[0]) {
 		writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "upload not found")
 		return
 	}
 	id := parts[0]
+	session, ok := s.get(id)
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "upload not found")
+		return
+	}
+	// Identity is immutable for the life of a session. Ownerless historical
+	// sessions are not claimable once authentication is configured.
+	if s.auth != nil && (session.ownerID != principal.UserID || session.workspaceID != principal.WorkspaceID) {
+		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "upload belongs to another owner or workspace")
+		return
+	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		session, ok := s.get(id)
-		if !ok {
-			writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "upload not found")
-			return
-		}
 		writeJSON(w, http.StatusOK, uploadView(session))
 		return
 	}
@@ -248,7 +353,7 @@ func (s *uploadStore) handleItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "complete" && r.Method == http.MethodPost {
-		s.handleComplete(w, r, id)
+		s.handleComplete(w, r, id, principal)
 		return
 	}
 	writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "unsupported upload operation")
@@ -323,23 +428,45 @@ func (s *uploadStore) handlePart(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	finalName := filepath.Join(directory, fmt.Sprintf("part-%08d", partNo))
-	if err := os.Remove(finalName); err != nil && !os.IsNotExist(err) {
+	previousName := temporaryName + ".previous"
+	previousExists := false
+	if err := os.Rename(finalName, previousName); err == nil {
+		previousExists = true
+	} else if !os.IsNotExist(err) {
 		s.mu.Unlock()
 		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not replace existing part")
 		return
 	}
+	restorePrevious := func() {
+		_ = os.Remove(finalName)
+		if previousExists {
+			if err := os.Rename(previousName, finalName); err != nil {
+				log.Printf("restore upload part %s/%d: %v", id, partNo, err)
+			}
+		}
+	}
 	if err := os.Rename(temporaryName, finalName); err != nil {
+		restorePrevious()
 		s.mu.Unlock()
 		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not commit part")
 		return
 	}
 	removeTemporary = false
-	session.received[partNo] = written
-	session.status = "uploading"
-	view := uploadView(session)
 	snapshot := cloneUploadSession(session)
+	snapshot.received[partNo] = written
+	snapshot.status = "uploading"
+	if err := s.persistSessionLocked(snapshot); err != nil {
+		restorePrevious()
+		s.mu.Unlock()
+		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not persist uploaded part")
+		return
+	}
+	if previousExists {
+		_ = os.Remove(previousName)
+	}
+	*session = snapshot
+	view := uploadView(session)
 	s.mu.Unlock()
-	s.persistSession(snapshot)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"uploadId":      id,
 		"partNo":        partNo,
@@ -348,7 +475,7 @@ func (s *uploadStore) handlePart(w http.ResponseWriter, r *http.Request, id stri
 	})
 }
 
-func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id string) {
+func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id string, principal authPrincipal) {
 	var input struct {
 		ContentHash string `json:"contentHash"`
 	}
@@ -369,9 +496,29 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	if session.status == "completed" {
-		view := uploadView(session)
+		if session.contentHash != contentHash {
+			s.mu.Unlock()
+			writeAPIError(w, http.StatusUnprocessableEntity, "UPLOAD_PART_INVALID", "content hash does not match completed upload")
+			return
+		}
+		snapshot := cloneUploadSession(session)
+		if session.entryID != "" || s.auth != nil {
+			committer, supported := s.committer.(atomicDirectoryCommitter)
+			if !supported {
+				s.mu.Unlock()
+				writeAPIError(w, http.StatusServiceUnavailable, "INTERNAL_ERROR", "atomic upload directory committer unavailable")
+				return
+			}
+			var err error
+			snapshot, err = committer.completeUploadEntry(principal, snapshot, s.backend)
+			if err != nil {
+				s.mu.Unlock()
+				writeUploadCommitError(w, err)
+				return
+			}
+		}
 		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]interface{}{"uploadId": id, "resourceId": view.ResourceID, "contentHash": view.ContentHash, "status": "completed"})
+		writeJSON(w, http.StatusOK, uploadCompletionView(&snapshot))
 		return
 	}
 	if session.status != "created" && session.status != "uploading" {
@@ -391,9 +538,13 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 			return
 		}
 	}
+	previousStatus := session.status
 	session.status = "verifying"
-	directory := session.directory
-	totalParts := session.totalParts
+	// Verification is an in-flight reservation only. Durable state stays
+	// retryable until the joint commit succeeds.
+	snapshot := cloneUploadSession(session)
+	directory := snapshot.directory
+	totalParts := snapshot.totalParts
 	s.mu.Unlock()
 
 	temporary, err := os.CreateTemp(directory, ".complete-*")
@@ -432,7 +583,7 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
-	if written != session.size || !strings.EqualFold(actualHash, contentHash) {
+	if written != snapshot.size || !strings.EqualFold(actualHash, contentHash) {
 		_ = os.Remove(temporaryName)
 		s.markFailed(id)
 		writeAPIError(w, http.StatusUnprocessableEntity, "UPLOAD_PART_INVALID", "full upload hash does not match")
@@ -449,41 +600,66 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not commit completed upload")
 		return
 	}
+	snapshot.contentHash = actualHash
+	snapshot.resourceID = "sha256:" + actualHash
+	snapshot.completedPath = objectPath
 	s.mu.Lock()
-	if current, exists := s.sessions[id]; exists {
-		current.status = "completed"
-		current.contentHash = actualHash
-		current.resourceID = "sha256:" + actualHash
-		current.completedPath = objectPath
-		current.directory = ""
+	if snapshot.entryID != "" || s.auth != nil {
+		committer, supported := s.committer.(atomicDirectoryCommitter)
+		if !supported {
+			session.status = previousStatus
+			s.mu.Unlock()
+			writeAPIError(w, http.StatusServiceUnavailable, "INTERNAL_ERROR", "atomic upload directory committer unavailable")
+			return
+		}
+		snapshot, err = committer.completeUploadEntry(principal, snapshot, s.backend)
+	} else {
+		snapshot.status = "completed"
+		err = s.persistSessionLocked(snapshot)
 	}
-	view := uploadView(s.sessions[id])
-	snapshot := cloneUploadSession(s.sessions[id])
+	if err != nil {
+		// The CAS object is immutable and may remain deduplicated, but retain
+		// all parts and the original entry ID so the same session can retry.
+		session.status = previousStatus
+		s.mu.Unlock()
+		writeUploadCommitError(w, err)
+		return
+	}
+	*session = snapshot
 	s.mu.Unlock()
-	s.persistSession(snapshot)
 	s.removeSessionDirectory(directory)
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"uploadId":    id,
-		"resourceId":  view.ResourceID,
-		"contentHash": view.ContentHash,
-		"status":      "completed",
-	})
+	writeJSON(w, http.StatusCreated, uploadCompletionView(&snapshot))
+}
+
+func uploadCompletionView(session *uploadSession) map[string]interface{} {
+	response := map[string]interface{}{
+		"uploadId":    session.id,
+		"resourceId":  session.resourceID,
+		"contentHash": session.contentHash,
+		"status":      session.status,
+		"name":        session.name,
+		"finalName":   session.name,
+	}
+	if session.entryID != "" {
+		response["entryId"] = session.entryID
+	}
+	return response
 }
 
 func (s *uploadStore) markFailed(id string) {
 	s.mu.Lock()
-	var snapshot *uploadSession
-	directory := ""
+	defer s.mu.Unlock()
 	if session, ok := s.sessions[id]; ok {
-		session.status = "failed"
-		directory = session.directory
-		session.directory = ""
-		clone := cloneUploadSession(session)
-		snapshot = &clone
-	}
-	s.mu.Unlock()
-	if snapshot != nil {
-		s.persistSession(*snapshot)
+		snapshot := cloneUploadSession(session)
+		snapshot.status = "failed"
+		snapshot.directory = ""
+		if err := s.persistSessionLocked(snapshot); err != nil {
+			log.Printf("persist failed upload %s: %v", id, err)
+			session.status = "uploading"
+			return
+		}
+		directory := session.directory
+		*session = snapshot
 		s.removeSessionDirectory(directory)
 	}
 }
@@ -504,6 +680,10 @@ func (s *uploadStore) get(id string) (*uploadSession, bool) {
 func (s *uploadStore) activeSessionCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.activeSessionCountLocked()
+}
+
+func (s *uploadStore) activeSessionCountLocked() int {
 	count := 0
 	for _, session := range s.sessions {
 		switch session.status {
@@ -537,6 +717,10 @@ type uploadViewModel struct {
 	Status        string `json:"status"`
 	ContentHash   string `json:"contentHash,omitempty"`
 	ResourceID    string `json:"resourceId,omitempty"`
+	ParentID      string `json:"parentId,omitempty"`
+	OwnerID       string `json:"ownerId,omitempty"`
+	WorkspaceID   string `json:"workspaceId,omitempty"`
+	EntryID       string `json:"entryId,omitempty"`
 }
 
 func uploadView(session *uploadSession) uploadViewModel {
@@ -556,6 +740,10 @@ func uploadView(session *uploadSession) uploadViewModel {
 		Status:        session.status,
 		ContentHash:   session.contentHash,
 		ResourceID:    session.resourceID,
+		ParentID:      session.parentID,
+		OwnerID:       session.ownerID,
+		WorkspaceID:   session.workspaceID,
+		EntryID:       session.entryID,
 	}
 }
 

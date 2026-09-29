@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { DomainEvent } from "@linkos/protocol";
+import { EVENT_TYPES, type DomainEvent } from "@linkos/protocol";
 import { ensureSession, getGatewayBase, getSessionToken } from "./api";
+import { snapshotCursorFrom } from "./snapshotResync";
 
 type SocketPayload = {
   body?: string;
@@ -12,21 +13,37 @@ type SocketEvent = DomainEvent<SocketPayload>;
 
 type WorkspaceSocketOptions = {
   onEvent?: (event: SocketEvent) => void;
+  /**
+   * Invoked when the gateway reports that our replay cursor fell outside the
+   * retention window (ADR-001 §2.4). The argument is the snapshot sequence the
+   * client must adopt as its new cursor; the caller refetches authoritative
+   * state. The hook has already reset the cursor and cleared its dedup sets.
+   */
+  onSnapshotRequired?: (cursor: number) => void;
 };
 
 const HEARTBEAT_MS = 25_000;
 const RECONNECT_BASE_MS = 800;
 const RECONNECT_MAX_MS = 8_000;
 
-export function useWorkspaceSocket({ onEvent }: WorkspaceSocketOptions = {}) {
+export function useWorkspaceSocket({
+  onEvent,
+  onSnapshotRequired,
+}: WorkspaceSocketOptions = {}) {
   const [connected, setConnected] = useState(false);
   const [lastSeq, setLastSeq] = useState(0);
+  const [resyncSeq, setResyncSeq] = useState(0);
   const handlerRef = useRef(onEvent);
+  const snapshotRef = useRef(onSnapshotRequired);
   const lastSeqRef = useRef(0);
 
   useEffect(() => {
     handlerRef.current = onEvent;
   }, [onEvent]);
+
+  useEffect(() => {
+    snapshotRef.current = onSnapshotRequired;
+  }, [onSnapshotRequired]);
 
   useEffect(() => {
     let socket: WebSocket | undefined;
@@ -92,6 +109,16 @@ export function useWorkspaceSocket({ onEvent }: WorkspaceSocketOptions = {}) {
       socket.onmessage = (raw) => {
         try {
           const event = JSON.parse(raw.data) as SocketEvent;
+          if (event.type === EVENT_TYPES.workspaceSnapshotRequired) {
+            const cursor = snapshotCursorFrom(event.payload, lastSeqRef.current);
+            lastSeqRef.current = cursor;
+            setLastSeq(cursor);
+            seenEventIds.clear();
+            seenClientMsgIds.clear();
+            setResyncSeq(cursor);
+            snapshotRef.current?.(cursor);
+            return;
+          }
           if (typeof event.seq === "number" && event.seq > lastSeqRef.current) {
             lastSeqRef.current = event.seq;
             setLastSeq(event.seq);
@@ -140,7 +167,7 @@ export function useWorkspaceSocket({ onEvent }: WorkspaceSocketOptions = {}) {
     };
   }, []);
 
-  return { connected, lastSeq };
+  return { connected, lastSeq, resyncSeq };
 }
 
 export type { SocketEvent };

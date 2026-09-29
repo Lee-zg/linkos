@@ -1,4 +1,4 @@
-import { Cpu, HardDrive, Sparkles, Users, Wifi, Zap } from "lucide-react";
+import { Cpu, HardDrive, RefreshCw, Sparkles, Users, Wifi, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import { useWorkspace } from "../lib/workspace";
 
@@ -86,9 +86,26 @@ function RunnerRow({
 }
 
 export function SystemApp() {
-  const { connected, lastSeq } = useWorkspace();
+  const { connected, lastSeq, resyncSeq } = useWorkspace();
   return (
     <div className="flex flex-col gap-4 p-4">
+      {resyncSeq > 0 && (
+        <div
+          className="flex items-center gap-3 rounded-lg border border-accent/40 bg-accent/10 p-3"
+          role="status"
+          data-testid="resync-indicator"
+        >
+          <span className="grid h-8 w-8 place-items-center rounded-full border text-foreground/70">
+            <RefreshCw size={14} />
+          </span>
+          <div className="flex-1">
+            <p className="m-0 text-sm font-medium">已按快照恢复会话</p>
+            <p className="m-0 text-xs text-muted-foreground">
+              历史事件超出重放窗口，已从服务端快照重建至事件 {resyncSeq}。
+            </p>
+          </div>
+        </div>
+      )}
       <div
         className={`flex items-center gap-3 rounded-lg border p-4 ${
           connected ? "bg-card" : "border-warning/40 bg-warning/10"

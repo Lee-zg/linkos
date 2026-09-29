@@ -28,6 +28,7 @@ type persistBackend interface {
 	appendEvent(event) error
 	loadUploadSessions() ([]uploadSession, error)
 	saveUploadSession(uploadSession) error
+	saveUploadWithMVPState(uploadSession, []byte) error
 	backupTo(dir string) (backupManifest, error)
 	Close() error
 }
@@ -82,14 +83,15 @@ func (memoryBackend) appendEvent(event) error           { return nil }
 func (memoryBackend) loadUploadSessions() ([]uploadSession, error) {
 	return nil, nil
 }
-func (memoryBackend) saveUploadSession(uploadSession) error      { return nil }
-func (memoryBackend) loadMVPState() ([]byte, error)              { return nil, nil }
-func (memoryBackend) saveMVPState([]byte) error                  { return nil }
-func (memoryBackend) loadAuthState() ([]byte, error)             { return nil, nil }
-func (memoryBackend) saveAuthState([]byte) error                 { return nil }
-func (memoryBackend) indexMVPMessage(protocol.ChatMessage) error { return nil }
-func (memoryBackend) removeMVPMessage(string) error              { return nil }
-func (memoryBackend) searchMVPMessage(string) ([]string, error)  { return nil, nil }
+func (memoryBackend) saveUploadSession(uploadSession) error              { return nil }
+func (memoryBackend) saveUploadWithMVPState(uploadSession, []byte) error { return nil }
+func (memoryBackend) loadMVPState() ([]byte, error)                      { return nil, nil }
+func (memoryBackend) saveMVPState([]byte) error                          { return nil }
+func (memoryBackend) loadAuthState() ([]byte, error)                     { return nil, nil }
+func (memoryBackend) saveAuthState([]byte) error                         { return nil }
+func (memoryBackend) indexMVPMessage(protocol.ChatMessage) error         { return nil }
+func (memoryBackend) removeMVPMessage(string) error                      { return nil }
+func (memoryBackend) searchMVPMessage(string) ([]string, error)          { return nil, nil }
 func (memoryBackend) backupTo(string) (backupManifest, error) {
 	return backupManifest{}, errors.New("memory backend has no durable state to back up")
 }

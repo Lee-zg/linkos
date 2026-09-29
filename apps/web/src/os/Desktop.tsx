@@ -1,17 +1,49 @@
 import { useState } from "react";
+import { Folder, Monitor, Settings } from "lucide-react";
 import { visibleApps } from "./apps";
 import { AppIcon } from "./AppIcon";
 import { useWindowManager } from "./window-manager";
 import { useSession } from "../lib/session";
+import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
 
 export function Desktop() {
-  const { open } = useWindowManager();
+  const { windows, open, minimize, close, minimizeAll } = useWindowManager();
   const { profile } = useSession();
   const [selected, setSelected] = useState<string | null>(null);
+  const { open: openMenu } = useContextMenu();
+
+  const desktopMenu: ContextMenuItem[] = [
+    {
+      id: "open-files",
+      label: "打开文件管理器",
+      icon: <Folder size={14} />,
+      onClick: () => open("files"),
+    },
+    {
+      id: "show-desktop",
+      label: "显示桌面",
+      icon: <Monitor size={14} />,
+      onClick: minimizeAll,
+    },
+    {
+      id: "settings",
+      label: "系统设置",
+      icon: <Settings size={14} />,
+      onClick: () => open("settings"),
+    },
+  ];
+
+  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openMenu(e.clientX, e.clientY, desktopMenu, e.currentTarget);
+  };
+
   return (
     <div
       className="wallpaper fixed inset-0 overflow-hidden"
       onPointerDown={() => setSelected(null)}
+      onContextMenu={handleContextMenu}
     >
       <div className="desktop-icons relative z-[1] p-3">
         {visibleApps(profile.role).map((app) => (
@@ -25,11 +57,30 @@ export function Desktop() {
               event.stopPropagation();
               setSelected(app.id);
             }}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setSelected(app.id);
+              const win = windows.find((item) => item.appId === app.id);
+              const items: ContextMenuItem[] = [{ id: "open", label: win ? "显示窗口" : "打开", onClick: () => open(app.id) }];
+              if (win) items.push(
+                { id: "minimize", label: "最小化", onClick: () => minimize(win.id) },
+                { id: "close", label: "关闭窗口", onClick: () => close(win.id) },
+              );
+              const rect = event.currentTarget.getBoundingClientRect();
+              openMenu(event.clientX || rect.left, event.clientY || rect.bottom, items, event.currentTarget);
+            }}
             onDoubleClick={() => open(app.id)}
             onClick={() => {
               if (window.matchMedia("(max-width: 767px)").matches) open(app.id);
             }}
             onKeyDown={(event) => {
+              if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                event.preventDefault();
+                event.stopPropagation();
+                event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+                return;
+              }
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
                 open(app.id);

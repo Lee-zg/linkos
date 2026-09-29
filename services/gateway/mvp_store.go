@@ -37,6 +37,8 @@ type mvpBlobBackend interface {
 type mvpState struct {
 	Resources                map[string]protocol.ResourceRecord    `json:"resources"`
 	Shares                   map[string]protocol.ResourceShareLink `json:"shares"`
+	LegacyFilesInitialized   bool                                  `json:"legacyFilesInitialized"`
+	LegacyReadableHashes     map[string]bool                       `json:"legacyReadableHashes"`
 	Channels                 map[string]protocol.ChatChannel       `json:"channels"`
 	Messages                 map[string]protocol.ChatMessage       `json:"messages"`
 	CodeFiles                map[string]protocol.CodeFile          `json:"codeFiles"`
@@ -81,6 +83,8 @@ type mvpStore struct {
 	contentDownload http.HandlerFunc
 	content         *contentStore
 	state           mvpState
+	resourceRev     int64
+	loadErr         error
 }
 
 func (s *mvpStore) recordMutation(r *http.Request, principal authPrincipal, action, target, detail string) {
@@ -93,9 +97,19 @@ func (s *mvpStore) recordMutation(r *http.Request, principal authPrincipal, acti
 func newMVPStore(backend persistBackend, h *hub) *mvpStore {
 	s := &mvpStore{backend: backend, hub: h, state: newMVPState()}
 	if durable, ok := backend.(mvpBlobBackend); ok {
-		if raw, err := durable.loadMVPState(); err == nil && len(raw) > 0 {
+		raw, err := durable.loadMVPState()
+		if err != nil {
+			s.loadErr = fmt.Errorf("load mvp state: %w", err)
+			return s
+		}
+		if raw != nil {
 			if err := json.Unmarshal(raw, &s.state); err != nil {
-				log.Printf("load mvp state: %v", err)
+				s.loadErr = fmt.Errorf("decode mvp state: %w", err)
+				return s
+			}
+			if strings.TrimSpace(string(raw)) == "null" {
+				s.loadErr = errors.New("mvp state must be an object")
+				return s
 			}
 		}
 	}
@@ -103,6 +117,107 @@ func newMVPStore(backend persistBackend, h *hub) *mvpStore {
 	s.ensureSeedData()
 	s.rebuildMessageIndex()
 	return s
+}
+
+func (s *mvpStore) initializeFileStorage(content *contentStore) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loadErr != nil {
+		return s.loadErr
+	}
+	manifest := struct {
+		Initialized bool            `json:"initialized"`
+		Hashes      map[string]bool `json:"hashes"`
+	}{}
+	manifestPath := filepath.Join(content.root, ".legacy-readable.json")
+	stored, readErr := os.ReadFile(manifestPath)
+	if readErr == nil {
+		if err := json.Unmarshal(stored, &manifest); err != nil {
+			return fmt.Errorf("decode legacy file manifest: %w", err)
+		}
+		if !manifest.Initialized || manifest.Hashes == nil {
+			return errors.New("invalid legacy file manifest")
+		}
+		for hash := range manifest.Hashes {
+			if !isDigest(hash) {
+				return errors.New("invalid legacy file digest")
+			}
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("read legacy file manifest: %w", readErr)
+	} else {
+		manifest.Initialized = true
+		manifest.Hashes = s.state.LegacyReadableHashes
+		if manifest.Hashes == nil {
+			manifest.Hashes = make(map[string]bool)
+		}
+		if !s.state.LegacyFilesInitialized {
+			referenced := make(map[string]bool)
+			for _, item := range s.state.Resources {
+				if hash, ok := item.Meta["contentHash"].(string); ok {
+					referenced[hash] = true
+				}
+			}
+			for _, artifact := range s.state.Artifacts {
+				referenced[artifact.ContentHash] = true
+			}
+			manifest.Hashes = make(map[string]bool)
+			if err := filepath.WalkDir(content.root, func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if !entry.Type().IsRegular() {
+					return nil
+				}
+				hash := strings.TrimSuffix(entry.Name(), ".bin")
+				if isDigest(hash) && filepath.Clean(path) == filepath.Clean(content.objectPath(hash)) && !referenced[hash] {
+					manifest.Hashes[hash] = true
+				}
+				return nil
+			}); err != nil {
+				return fmt.Errorf("scan legacy file content: %w", err)
+			}
+		}
+		// CAS outlives memory-mode metadata, so its historical boundary must also live on disk.
+		raw, err := json.Marshal(manifest)
+		if err != nil {
+			return err
+		}
+		temporary, err := os.CreateTemp(content.root, ".legacy-*tmp")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(temporary.Name())
+		if _, err = temporary.Write(raw); err == nil {
+			err = temporary.Sync()
+		}
+		closeErr := temporary.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if err := os.Rename(temporary.Name(), manifestPath); err != nil {
+			return err
+		}
+	}
+	candidate := s.state
+	candidate.LegacyReadableHashes = manifest.Hashes
+	candidate.LegacyFilesInitialized = true
+	raw, err := json.Marshal(candidate)
+	if err != nil {
+		return err
+	}
+	backend, ok := s.backend.(mvpBlobBackend)
+	if !ok {
+		return errors.New("file storage requires MVP persistence")
+	}
+	if err := backend.saveMVPState(raw); err != nil {
+		return fmt.Errorf("freeze legacy file content: %w", err)
+	}
+	s.state = candidate
+	return nil
 }
 
 func normalizeMVPState(state *mvpState) {
@@ -765,8 +880,8 @@ func principalForRequest(auth *authStore, r *http.Request) (authPrincipal, bool)
 
 func registerMVPRoutes(mux *http.ServeMux, auth *authStore, store *mvpStore) {
 	active := func(handler http.HandlerFunc) http.HandlerFunc { return requireActive(auth, "demo", handler) }
-	mux.HandleFunc("/api/v1/resources", active(store.handleResources))
-	mux.HandleFunc("/api/v1/resources/", active(store.handleResourceItem))
+	mux.HandleFunc("/api/v1/resources", active(store.handleFilesResources))
+	mux.HandleFunc("/api/v1/resources/", active(store.handleFilesResourceItem))
 	mux.HandleFunc("/api/v1/shares/", store.handleShare)
 	mux.HandleFunc("/api/v1/channels", active(store.handleChannels))
 	mux.HandleFunc("/api/v1/channels/", active(store.handleChannelItem))
@@ -781,90 +896,6 @@ func registerMVPRoutes(mux *http.ServeMux, auth *authStore, store *mvpStore) {
 	mux.HandleFunc("/api/v1/plugins", active(store.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", active(store.handlePluginItem))
 	mux.HandleFunc("/api/v1/metrics", active(store.handleMetrics))
-}
-
-func (s *mvpStore) handleResources(w http.ResponseWriter, r *http.Request) {
-	principal, _ := principalForRequest(s.authFromHub(), r)
-	if r.Method == http.MethodPost {
-		if !roleAllows(principal.Role, "resource.write") {
-			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "resource.write permission required")
-			return
-		}
-		var input struct {
-			Type     string                 `json:"type"`
-			Name     string                 `json:"name"`
-			ParentID string                 `json:"parentId"`
-			Meta     map[string]interface{} `json:"meta"`
-			ACL      protocol.ResourceACL   `json:"acl"`
-		}
-		if json.NewDecoder(io.LimitReader(r.Body, 128*1024)).Decode(&input) != nil || strings.TrimSpace(input.Name) == "" {
-			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "resource name is required")
-			return
-		}
-		if input.Type == "" {
-			input.Type = "folder"
-		}
-		if input.ParentID != "" {
-			s.mu.RLock()
-			_, exists := s.state.Resources[input.ParentID]
-			s.mu.RUnlock()
-			if !exists {
-				writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "parent resource not found")
-				return
-			}
-		}
-		var random [12]byte
-		if _, err := cryptorand.Read(random[:]); err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create resource id")
-			return
-		}
-		now := time.Now().UTC().Format(time.RFC3339)
-		item := protocol.ResourceRecord{ID: "res_" + base64.RawURLEncoding.EncodeToString(random[:]), WorkspaceID: "demo", Type: input.Type, Name: strings.TrimSpace(input.Name), ParentID: input.ParentID, OwnerID: principal.UserID, ACL: input.ACL, Meta: input.Meta, CreatedAt: now, UpdatedAt: now}
-		s.mu.Lock()
-		s.state.Resources[item.ID] = item
-		s.persistLocked()
-		s.mu.Unlock()
-		s.recordMutation(r, principal, "resource.create", item.ID, item.Type)
-		writeJSON(w, http.StatusCreated, item)
-		return
-	}
-	if r.Method != http.MethodGet {
-		writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method not allowed")
-		return
-	}
-	type resourcePage struct {
-		Items      []protocol.ResourceRecord `json:"items"`
-		NextCursor string                    `json:"nextCursor,omitempty"`
-	}
-	type resourceFilter struct{ Type, ParentID string }
-	filter := resourceFilter{Type: strings.TrimSpace(r.URL.Query().Get("type")), ParentID: strings.TrimSpace(r.URL.Query().Get("parentId"))}
-	s.mu.RLock()
-	items := make([]protocol.ResourceRecord, 0, len(s.state.Resources))
-	for _, item := range s.state.Resources {
-		if filter.Type != "" && item.Type != filter.Type || filter.ParentID != "" && item.ParentID != filter.ParentID || !resourceAllows(principal, item, "resource.read") {
-			continue
-		}
-		items = append(items, item)
-	}
-	s.mu.RUnlock()
-	sort.Slice(items, func(i, j int) bool { return items[i].UpdatedAt < items[j].UpdatedAt })
-	start := 0
-	if n, err := strconv.Atoi(r.URL.Query().Get("cursor")); err == nil && n >= 0 {
-		start = n
-	}
-	limit := parseLimit(r.URL.Query().Get("limit"))
-	if limit < 1 || limit > 200 {
-		limit = 50
-	}
-	if start > len(items) {
-		start = len(items)
-	}
-	end := minInt(start+limit, len(items))
-	next := ""
-	if end < len(items) {
-		next = strconv.Itoa(end)
-	}
-	writeJSON(w, http.StatusOK, resourcePage{Items: items[start:end], NextCursor: next})
 }
 
 func resourceAllows(principal authPrincipal, item protocol.ResourceRecord, action string) bool {
@@ -884,98 +915,15 @@ func resourceAllows(principal authPrincipal, item protocol.ResourceRecord, actio
 	return false
 }
 
-func (s *mvpStore) handleResourceItem(w http.ResponseWriter, r *http.Request) {
-	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/resources/"), "/")
-	parts := strings.Split(path, "/")
-	id := parts[0]
-	if id == "" {
-		writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "resource not found")
-		return
-	}
-	principal, _ := principalForRequest(s.authFromHub(), r)
-	s.mu.RLock()
-	item, exists := s.state.Resources[id]
-	s.mu.RUnlock()
-	if !exists {
-		writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "resource not found")
-		return
-	}
-	if len(parts) > 1 && parts[1] == "share" {
-		if r.Method != http.MethodPost || !resourceAllows(principal, item, "resource.write") {
-			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "resource.write permission required")
-			return
-		}
-		var input struct {
-			TTLSeconds int `json:"ttlSeconds"`
-		}
-		_ = json.NewDecoder(io.LimitReader(r.Body, 8*1024)).Decode(&input)
-		if input.TTLSeconds <= 0 || input.TTLSeconds > 24*60*60 {
-			input.TTLSeconds = 15 * 60
-		}
-		var random [24]byte
-		if _, err := cryptorand.Read(random[:]); err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not create share link")
-			return
-		}
-		now := time.Now().UTC()
-		share := protocol.ResourceShareLink{Token: base64.RawURLEncoding.EncodeToString(random[:]), ResourceID: id, ExpiresAt: now.Add(time.Duration(input.TTLSeconds) * time.Second).Format(time.RFC3339), SingleUse: true, CreatedBy: principal.UserID, CreatedAt: now.Format(time.RFC3339)}
-		s.mu.Lock()
-		s.state.Shares[share.Token] = share
-		s.persistLocked()
-		s.mu.Unlock()
-		s.recordMutation(r, principal, "resource.share.create", id, share.ExpiresAt)
-		writeJSON(w, http.StatusCreated, share)
-		return
-	}
-	if !resourceAllows(principal, item, "resource.read") {
-		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "resource.read permission required")
-		return
-	}
-	if r.Method == http.MethodPatch {
-		if !resourceAllows(principal, item, "resource.write") {
-			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "resource.write permission required")
-			return
-		}
-		var input struct {
-			Name string                 `json:"name"`
-			Meta map[string]interface{} `json:"meta"`
-			ACL  *protocol.ResourceACL  `json:"acl"`
-		}
-		if json.NewDecoder(io.LimitReader(r.Body, 128*1024)).Decode(&input) != nil {
-			writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid resource update")
-			return
-		}
-		s.mu.Lock()
-		if input.Name != "" {
-			item.Name = strings.TrimSpace(input.Name)
-		}
-		if input.Meta != nil {
-			item.Meta = input.Meta
-		}
-		if input.ACL != nil {
-			item.ACL = *input.ACL
-		}
-		item.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.state.Resources[id] = item
-		s.persistLocked()
-		s.mu.Unlock()
-		s.recordMutation(r, principal, "resource.update", id, item.Name)
-	}
-	if r.Method == http.MethodGet {
-		s.mu.Lock()
-		item.LastAccessedAt = time.Now().UTC().Format(time.RFC3339)
-		s.state.Resources[id] = item
-		s.persistLocked()
-		s.mu.Unlock()
-	}
-	writeJSON(w, http.StatusOK, item)
-}
-
 func (s *mvpStore) handleShare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+		return
+	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/shares/"), "/")
 	parts := strings.Split(path, "/")
 	token := parts[0]
-	if token == "" {
+	if token == "" || len(parts) > 2 || len(parts) == 2 && parts[1] != "content" {
 		writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "share link not found")
 		return
 	}
@@ -987,41 +935,68 @@ func (s *mvpStore) handleShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expires, err := time.Parse(time.RFC3339, share.ExpiresAt)
-	if err != nil || time.Now().UTC().After(expires) || share.UsedAt != "" {
+	if err != nil || !time.Now().UTC().Before(expires) || share.UsedAt != "" {
 		s.mu.Unlock()
 		writeAPIError(w, http.StatusGone, "ACCESS_REVOKED", "share link has expired or was used")
 		return
 	}
-	if len(parts) > 1 && parts[1] == "content" {
-		if r.Method != http.MethodGet {
-			s.mu.Unlock()
-			writeAPIError(w, http.StatusMethodNotAllowed, "INVALID_REQUEST", "method not allowed")
-			return
-		}
-		if share.SingleUse {
-			share.UsedAt = time.Now().UTC().Format(time.RFC3339)
-			s.state.Shares[token] = share
-			s.persistLocked()
-		}
-		resourceID := share.ResourceID
+	resourceID := share.ResourceID
+	item, exists := s.state.Resources[resourceID]
+	legacyHash, legacy := strings.CutPrefix(resourceID, "sha256:")
+	legacy = legacy && isDigest(legacyHash)
+	if !exists && !legacy {
 		s.mu.Unlock()
-		r.URL.Path = "/api/v1/files/" + resourceID + "/content"
-		// The share token is the authorization for this one-time download.
-		if content := s.contentHandler(); content != nil {
-			content(w, r)
-			return
-		}
-		writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "resource content unavailable")
+		writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "shared resource no longer exists")
 		return
 	}
-	shareResource := share.ResourceID
+	download := len(parts) == 2
+	if download {
+		if !legacy {
+			hash, _ := item.Meta["contentHash"].(string)
+			if item.Type != "file" || !isDigest(hash) {
+				s.mu.Unlock()
+				writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "resource has no downloadable content")
+				return
+			}
+			resourceID = "sha256:" + hash
+		}
+		if s.contentHandler() == nil {
+			s.mu.Unlock()
+			writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "resource content unavailable")
+			return
+		}
+	}
 	if share.SingleUse {
 		share.UsedAt = time.Now().UTC().Format(time.RFC3339)
-		s.state.Shares[token] = share
-		s.persistLocked()
+		candidate := s.state
+		candidate.Shares = make(map[string]protocol.ResourceShareLink, len(s.state.Shares))
+		for key, value := range s.state.Shares {
+			candidate.Shares[key] = value
+		}
+		candidate.Shares[token] = share
+		raw, err := json.Marshal(candidate)
+		if err == nil {
+			if backend, ok := s.backend.(mvpBlobBackend); ok {
+				err = backend.saveMVPState(raw)
+			} else {
+				err = errors.New("share persistence unavailable")
+			}
+		}
+		if err != nil {
+			s.mu.Unlock()
+			writeAPIError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not consume share")
+			return
+		}
+		s.state = candidate
 	}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]interface{}{"resourceId": shareResource, "expiresAt": share.ExpiresAt, "usedAt": share.UsedAt})
+	if download {
+		request := r.Clone(r.Context())
+		request.URL.Path = "/api/v1/files/" + resourceID + "/content"
+		s.contentHandler()(w, request)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"resourceId": share.ResourceID, "expiresAt": share.ExpiresAt, "usedAt": share.UsedAt})
 }
 
 func (s *mvpStore) contentHandler() http.HandlerFunc { return s.contentDownload }

@@ -17,6 +17,7 @@ import type {
   RunnerInfo,
   ResourceRecord,
   ResourceShareLink,
+  WorkspaceSnapshot,
 } from "@linkos/protocol";
 import { clearSession, loadRefreshToken, loadToken, saveSession } from "./session";
 import { getOrCreateDeviceIdentity } from "./deviceIdentity";
@@ -134,15 +135,47 @@ export function getSessionToken() {
 export async function createSession(
   input: SessionCreateInput,
 ): Promise<SessionToken> {
-	const identity = await getOrCreateDeviceIdentity();
+  const identity = await getOrCreateDeviceIdentity();
+  const workspaceId = input.workspaceId?.trim() || "demo";
+  // Identity and proof come only from the locally held key, never caller overrides.
+  const body: SessionCreateInput = {
+    ...input,
+    workspaceId,
+    deviceId: identity?.deviceId,
+    publicKey: identity?.publicKey,
+    challengeId: undefined,
+    signature: undefined,
+  };
   let response: Response;
   try {
+    if (identity) {
+      // The gateway issues challenges for both new and registered devices.
+      // Do not turn network/auth/endpoint failures into unsigned registration.
+      const challengeResponse = await fetch(apiURL("/api/v1/sessions/challenge"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaceId, deviceId: identity.deviceId }),
+      });
+      const challenge = await challengeResponse.json().catch(() => undefined) as
+        | { challengeId?: unknown; deviceId?: unknown; message?: unknown }
+        | undefined;
+      if (!challengeResponse.ok) {
+        throw apiErrorFromPayload(challengeResponse.status, challenge);
+      }
+      if (!challenge || typeof challenge.challengeId !== "string" || !challenge.challengeId ||
+          challenge.deviceId !== identity.deviceId || typeof challenge.message !== "string" || !challenge.message) {
+        throw new ApiError(challengeResponse.status, "服务器返回了无效设备验证请求");
+      }
+      body.challengeId = challenge.challengeId;
+      body.signature = await identity.signChallenge(challenge.message);
+    }
     response = await fetch(apiURL("/api/v1/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspaceId: "demo", ...(identity ?? {}), ...input }),
+      body: JSON.stringify(body),
     });
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw new ApiError(
       0,
       error instanceof Error ? error.message : "网络连接失败",
@@ -262,6 +295,14 @@ export function sendMessage(payload: MessageCreateInput) {
   });
 }
 
+/**
+ * Authoritative workspace state used to recover when the gateway signals that a
+ * client's replay cursor fell outside the retention window (ADR-001 §2.4).
+ */
+export function getSnapshot() {
+  return request<WorkspaceSnapshot>("/api/v1/workspaces/demo/snapshot");
+}
+
 export function submitJob(spec: JobSpec) {
   return request<JobRef>("/api/v1/jobs", {
     method: "POST",
@@ -301,7 +342,14 @@ export function listCodeFiles(projectId = "project_gateway") {
 }
 
 export function getCodeFile(id: string) {
-  return request<{ file: CodeFile; content: string }>(`/api/v1/code/files/${encodeURIComponent(id)}`);
+  return request<{
+    file: CodeFile;
+    content: string;
+    lineStart: number;
+    lineEnd: number;
+    totalLines: number;
+    truncated: boolean;
+  }>(`/api/v1/code/files/${encodeURIComponent(id)}`);
 }
 
 export function saveCodeFile(id: string, content: string, baseVersion: string, force = false) {
@@ -337,10 +385,53 @@ export function listPlugins() {
   return request<{ items: PluginRecord[]; nextCursor?: string }>("/api/v1/plugins");
 }
 
-export function listResources(input: { type?: string; parentId?: string; cursor?: string; limit?: number } = {}) {
+export type FileResource = ResourceRecord & { canRead?: boolean; canWrite?: boolean; canCreateChild?: boolean };
+export interface ResourceListing {
+  items: FileResource[];
+  nextCursor?: string;
+  total: number;
+  ancestors: Array<{ id: string; name: string }>;
+  canRead: boolean;
+  canWrite: boolean;
+  canCreateChild: boolean;
+}
+
+export function listResources(input: { scope?: string; parentId?: string; recent?: boolean; q?: string; sortBy?: "name" | "updatedAt" | "size"; sortOrder?: "asc" | "desc"; cursor?: string; limit?: number } = {}) {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(input)) if (value !== undefined && value !== "") params.set(key, String(value));
-  return request<{ items: ResourceRecord[]; nextCursor?: string }>(`/api/v1/resources?${params}`);
+  for (const [key, value] of Object.entries(input)) {
+    if (value !== undefined && value !== "") {
+      params.set(key, String(value));
+    } else if (key === "parentId" && value === "") {
+      params.set(key, "");
+    }
+  }
+  return request<ResourceListing>(`/api/v1/resources?${params}`);
+}
+
+export function getResource(id: string) {
+  return request<ResourceRecord>(`/api/v1/resources/${encodeURIComponent(id)}`);
+}
+
+export function createFolder(input: { name: string; parentId?: string; meta?: Record<string, unknown>; acl?: unknown }) {
+  return request<ResourceRecord>("/api/v1/resources", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...input, type: "folder" }),
+  });
+}
+
+export function moveResource(id: string, parentId: string) {
+  return request<ResourceRecord>(`/api/v1/resources/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ parentId }),
+  });
+}
+
+export function deleteResource(id: string, recursive = false) {
+  const params = new URLSearchParams();
+  if (recursive) params.set("recursive", "true");
+  return request<{ status: string; id: string }>(`/api/v1/resources/${encodeURIComponent(id)}?${params}`, { method: "DELETE" });
 }
 
 export function updateResource(id: string, patch: { name?: string; meta?: Record<string, unknown>; acl?: unknown }) {

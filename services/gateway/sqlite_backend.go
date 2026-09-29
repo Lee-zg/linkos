@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,8 @@ type sqliteBackend struct {
 }
 
 func newSQLiteBackend(path string) (*sqliteBackend, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
+	fileURL := &url.URL{Path: filepath.ToSlash(path)}
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", fileURL.EscapedPath())
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -223,6 +225,12 @@ var sqliteMigrations = [][]string{
 			plugin_id TEXT NOT NULL, version TEXT NOT NULL, manifest_json TEXT NOT NULL, signature TEXT,
 			status TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (plugin_id, version)
 		)`,
+	},
+	{
+		`ALTER TABLE uploads ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE uploads ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE uploads ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE uploads ADD COLUMN entry_id TEXT NOT NULL DEFAULT ''`,
 	},
 }
 
@@ -455,8 +463,8 @@ func (b *sqliteBackend) saveUploadSession(session uploadSession) error {
 		return fmt.Errorf("marshal received parts: %w", err)
 	}
 	_, err = b.db.Exec(`
-		INSERT INTO uploads (id, name, size, mime_type, chunk_size, total_parts, received, content_hash, status, directory, resource_id, completed_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO uploads (id, name, size, mime_type, chunk_size, total_parts, received, content_hash, status, directory, resource_id, completed_path, owner_id, workspace_id, parent_id, entry_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			size = excluded.size,
@@ -468,15 +476,20 @@ func (b *sqliteBackend) saveUploadSession(session uploadSession) error {
 			status = excluded.status,
 			directory = excluded.directory,
 			resource_id = excluded.resource_id,
-			completed_path = excluded.completed_path`,
+			completed_path = excluded.completed_path,
+			owner_id = excluded.owner_id,
+			workspace_id = excluded.workspace_id,
+			parent_id = excluded.parent_id,
+			entry_id = excluded.entry_id`,
 		session.id, session.name, session.size, session.mimeType, session.chunkSize, session.totalParts,
-		string(received), session.contentHash, session.status, session.directory, session.resourceID, session.completedPath)
+		string(received), session.contentHash, session.status, session.directory, session.resourceID, session.completedPath,
+		session.ownerID, session.workspaceID, session.parentID, session.entryID)
 	return err
 }
 
 func (b *sqliteBackend) loadUploadSessions() ([]uploadSession, error) {
 	rows, err := b.db.Query(`
-		SELECT id, name, size, mime_type, chunk_size, total_parts, received, content_hash, status, directory, resource_id, completed_path
+		SELECT id, name, size, mime_type, chunk_size, total_parts, received, content_hash, status, directory, resource_id, completed_path, owner_id, workspace_id, parent_id, entry_id
 		FROM uploads ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -488,7 +501,8 @@ func (b *sqliteBackend) loadUploadSessions() ([]uploadSession, error) {
 		var received []byte
 		if err := rows.Scan(&session.id, &session.name, &session.size, &session.mimeType, &session.chunkSize,
 			&session.totalParts, &received, &session.contentHash, &session.status, &session.directory,
-			&session.resourceID, &session.completedPath); err != nil {
+			&session.resourceID, &session.completedPath,
+			&session.ownerID, &session.workspaceID, &session.parentID, &session.entryID); err != nil {
 			return nil, err
 		}
 		session.received = make(map[int]int64)
@@ -520,6 +534,50 @@ func (b *sqliteBackend) saveMVPState(payload []byte) error {
 		ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
 		string(payload), time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// saveUploadWithMVPState atomically persists an upload session and the mvp
+// state blob. This is the joint commit interface that connects upload
+// completion with resource directory entry creation: if either write fails,
+// neither is committed.
+func (b *sqliteBackend) saveUploadWithMVPState(session uploadSession, mvpPayload []byte) error {
+	received, err := json.Marshal(session.received)
+	if err != nil {
+		return fmt.Errorf("marshal received parts: %w", err)
+	}
+	tx, err := b.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(`
+		INSERT INTO uploads (id, name, size, mime_type, chunk_size, total_parts, received, content_hash, status, directory, resource_id, completed_path, owner_id, workspace_id, parent_id, entry_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name = excluded.name, size = excluded.size, mime_type = excluded.mime_type,
+			chunk_size = excluded.chunk_size, total_parts = excluded.total_parts,
+			received = excluded.received, content_hash = excluded.content_hash,
+			status = excluded.status, directory = excluded.directory,
+			resource_id = excluded.resource_id, completed_path = excluded.completed_path,
+			owner_id = excluded.owner_id, workspace_id = excluded.workspace_id,
+			parent_id = excluded.parent_id, entry_id = excluded.entry_id`,
+		session.id, session.name, session.size, session.mimeType, session.chunkSize, session.totalParts,
+		string(received), session.contentHash, session.status, session.directory, session.resourceID, session.completedPath,
+		session.ownerID, session.workspaceID, session.parentID, session.entryID)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO mvp_state (id, payload, updated_at) VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`,
+		string(mvpPayload), time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (b *sqliteBackend) loadAuthState() ([]byte, error) {

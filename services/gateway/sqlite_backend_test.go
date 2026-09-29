@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,6 +25,30 @@ func newTestSQLiteBackend(t *testing.T, path string) *sqliteBackend {
 	}
 	t.Cleanup(func() { _ = backend.Close() })
 	return backend
+}
+
+func TestSQLiteReservedPathCharactersKeepDatabasesSeparate(t *testing.T) {
+	root := t.TempDir()
+	paths := []string{filepath.Join(root, "gateway#one.db"), filepath.Join(root, "gateway#two.db"), filepath.Join(root, "gateway%23three.db")}
+	for _, path := range paths {
+		backend := newTestSQLiteBackend(t, path)
+		if _, exists, err := backend.loadPolicy(); err != nil || exists {
+			t.Fatalf("database %q is not independent: exists=%v err=%v", path, exists, err)
+		}
+		if err := backend.savePolicy(policyState{AllowFullAnonymous: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("database must use the exact path %q: %v", path, err)
+		}
+		if err := backend.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened := newTestSQLiteBackend(t, path)
+		if policy, exists, err := reopened.loadPolicy(); err != nil || !exists || !policy.AllowFullAnonymous {
+			t.Fatalf("database %q did not survive restart: %+v exists=%v err=%v", path, policy, exists, err)
+		}
+	}
 }
 
 func TestSQLitePolicyRoundTrip(t *testing.T) {
@@ -405,5 +431,202 @@ func TestSQLiteUploadSessionRoundTrip(t *testing.T) {
 	sessions, err = reopened.loadUploadSessions()
 	if err != nil || len(sessions) != 1 || sessions[0].status != "completed" {
 		t.Fatalf("upload session must survive restart, sessions=%+v err=%v", sessions, err)
+	}
+}
+
+func TestSQLiteUploadSessionV8FieldsRoundTrip(t *testing.T) {
+	path := testSQLitePath(t)
+	backend := newTestSQLiteBackend(t, path)
+
+	session := uploadSession{
+		id:          "up_v8",
+		name:        "document.pdf",
+		size:        1024,
+		mimeType:    "application/pdf",
+		chunkSize:   512,
+		totalParts:  2,
+		received:    map[int]int64{0: 512},
+		status:      "uploading",
+		directory:   filepath.Join("root", "up_v8"),
+		contentHash: "deadbeef",
+		ownerID:     "user_123",
+		workspaceID: "ws_456",
+		parentID:    "folder_789",
+		entryID:     "entry_abc",
+	}
+	if err := backend.saveUploadSession(session); err != nil {
+		t.Fatalf("save with v8 fields: %v", err)
+	}
+
+	sessions, err := backend.loadUploadSessions()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	got := sessions[0]
+	if got.ownerID != "user_123" || got.workspaceID != "ws_456" || got.parentID != "folder_789" || got.entryID != "entry_abc" {
+		t.Fatalf("v8 fields must round-trip, got ownerID=%q workspaceID=%q parentID=%q entryID=%q",
+			got.ownerID, got.workspaceID, got.parentID, got.entryID)
+	}
+
+	if err := backend.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	sessions, err = reopened.loadUploadSessions()
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("v8 fields must survive restart, sessions=%+v err=%v", sessions, err)
+	}
+	if sessions[0].ownerID != "user_123" || sessions[0].workspaceID != "ws_456" {
+		t.Fatalf("v8 fields must persist across restart, got %+v", sessions[0])
+	}
+}
+
+func TestSQLiteUploadSessionV7ToV8Upgrade(t *testing.T) {
+	path := testSQLitePath(t)
+
+	oldDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open v7 database: %v", err)
+	}
+	t.Cleanup(func() { _ = oldDB.Close() })
+	if _, err := oldDB.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	for version, statements := range sqliteMigrations[:7] {
+		for _, statement := range statements {
+			if _, err := oldDB.Exec(statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := oldDB.Exec(`INSERT INTO schema_migrations(version) VALUES (?)`, version+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := oldDB.Exec(`SELECT owner_id FROM uploads`); err == nil {
+		t.Fatal("v7 fixture already contains the v8 owner column")
+	}
+	_, err = oldDB.Exec(`
+		INSERT INTO uploads (id, name, size, mime_type, chunk_size, total_parts, received, content_hash, status, directory, resource_id, completed_path)
+		VALUES ('up_legacy', 'old-file.txt', 256, 'text/plain', 128, 2, '{}', 'abc123', 'uploading', 'root/up_legacy', '', '')`)
+	if err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := oldDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := newSQLiteBackend(path)
+	if err != nil {
+		t.Fatalf("reopen after upgrade: %v", err)
+	}
+	defer upgraded.Close()
+
+	sessions, err := upgraded.loadUploadSessions()
+	if err != nil {
+		t.Fatalf("load after upgrade: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 legacy session, got %d", len(sessions))
+	}
+	legacy := sessions[0]
+	if legacy.id != "up_legacy" || legacy.name != "old-file.txt" || legacy.size != 256 {
+		t.Fatalf("legacy data must survive upgrade, got %+v", legacy)
+	}
+	if legacy.ownerID != "" || legacy.workspaceID != "" || legacy.parentID != "" || legacy.entryID != "" {
+		t.Fatalf("legacy v8 fields must default to empty, got ownerID=%q workspaceID=%q parentID=%q entryID=%q",
+			legacy.ownerID, legacy.workspaceID, legacy.parentID, legacy.entryID)
+	}
+}
+
+func TestSQLiteJointCommitAtomicity(t *testing.T) {
+	path := testSQLitePath(t)
+	backend := newTestSQLiteBackend(t, path)
+
+	session := uploadSession{
+		id:          "up_joint",
+		name:        "joint-test.bin",
+		size:        100,
+		mimeType:    "application/octet-stream",
+		chunkSize:   50,
+		totalParts:  2,
+		received:    map[int]int64{0: 50, 1: 50},
+		status:      "completed",
+		directory:   "",
+		contentHash: "joint123",
+		resourceID:  "sha256:joint123",
+		ownerID:     "user_joint",
+		workspaceID: "ws_joint",
+		parentID:    "folder_joint",
+		entryID:     "entry_joint",
+	}
+	mvpPayload := []byte(`{"resources":[{"id":"entry_joint","name":"joint-test.bin"}]}`)
+
+	if err := backend.saveUploadWithMVPState(session, mvpPayload); err != nil {
+		t.Fatalf("joint commit: %v", err)
+	}
+
+	sessions, err := backend.loadUploadSessions()
+	if err != nil {
+		t.Fatalf("load sessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].id != "up_joint" || sessions[0].entryID != "entry_joint" {
+		t.Fatalf("upload session not saved correctly, got %+v", sessions)
+	}
+
+	state, err := backend.loadMVPState()
+	if err != nil {
+		t.Fatalf("load mvp state: %v", err)
+	}
+	if string(state) != string(mvpPayload) {
+		t.Fatalf("mvp state not saved correctly, got %q", string(state))
+	}
+}
+
+func TestSQLiteJointCommitRollsBackOnMVPFailure(t *testing.T) {
+	path := testSQLitePath(t)
+	backend := newTestSQLiteBackend(t, path)
+
+	session := uploadSession{
+		id:          "up_rollback",
+		name:        "rollback.bin",
+		size:        100,
+		mimeType:    "application/octet-stream",
+		chunkSize:   50,
+		totalParts:  2,
+		received:    map[int]int64{},
+		status:      "uploading",
+		directory:   "root/up_rollback",
+		contentHash: "rollback123",
+	}
+	initialMVP := []byte(`{"initial":true}`)
+	if err := backend.saveMVPState(initialMVP); err != nil {
+		t.Fatalf("save initial mvp: %v", err)
+	}
+
+	_, err := backend.db.Exec(`DROP TABLE mvp_state`)
+	if err != nil {
+		t.Fatalf("drop mvp_state: %v", err)
+	}
+
+	err = backend.saveUploadWithMVPState(session, []byte(`{"should":"fail"}`))
+	if err == nil {
+		t.Fatal("expected joint commit to fail when mvp_state table is missing")
+	}
+
+	sessions, loadErr := backend.loadUploadSessions()
+	if loadErr != nil {
+		t.Fatalf("load sessions after failure: %v", loadErr)
+	}
+	for _, s := range sessions {
+		if s.id == "up_rollback" {
+			t.Fatal("upload session must not be saved when joint commit fails")
+		}
 	}
 }
