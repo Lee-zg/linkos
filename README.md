@@ -15,28 +15,30 @@
 
 ### 前置条件
 
-- Node.js 20+ 与 pnpm 9+
-- Go 1.25+
+- Node.js 24 或更新的稳定版本（推荐 24 LTS，已验证 26.4.0）与 pnpm 9.15.5
+- Go 1.25 系列（兼容 Go 1.26）
 
-### 启动 Gateway
+### 一次准备，一个命令启动
 
 ```bash
-cd services/gateway
-go run .
+pnpm run setup:dev
+pnpm dev
+pnpm run doctor
+pnpm run dev:status
 ```
 
-Gateway 默认监听 `http://127.0.0.1:8787`。
+启动器管理 Gateway 与 Vite，保留 HMR；先检查已有项目服务并复用，端口冲突时协调空闲端口。访问地址以终端输出为准。数据库、文件和日志保存在 `.local/linkos`，后端编译失败时保留旧实例。
 
 生产 Compose、TLS、Runner engine、备份恢复和回滚流程见 [`docs/deployment.md`](docs/deployment.md)。
 
-### 启动 Web
+### 便携部署
 
 ```bash
-pnpm install
-pnpm --filter @linkos/web dev
+linkos init --lan --host 192.168.1.20
+linkos serve
 ```
 
-打开 `http://127.0.0.1:5173`。Vite 会将 `/api` 代理到 Gateway。
+便携包内嵌网页和官方插件，部署机器无需 Node、Go 或 Docker。Windows 后续可双击 `start.cmd`，Linux 可执行 `./start.sh`。客户端需显式信任初始化生成的 CA。`pnpm release` 构建 Windows amd64 和 Linux amd64/arm64 发布包、清单与校验值。
 
 ### 运行检查
 
@@ -50,8 +52,8 @@ go test ./services/gateway/... ./services/runner/...
 
 ```text
 apps/web                 React + Vite 工作台
-services/gateway         Go API、WebSocket 事件和任务模拟
-services/runner          Runner 注册与任务协议骨架
+services/gateway         单地址网页、Go API、持久化与运行管理
+services/runner          可选的同主机 rootless 隔离任务执行
 packages/protocol        HTTP/WebSocket/资源/任务 schema
 packages/plugin-sdk      插件开发类型与权限模型
 plugins/*                官方插件 manifest
@@ -68,7 +70,7 @@ docs/                    架构、ADR 和开发计划
 
 ## 安全状态
 
-本地开发 API 默认使用 demo 数据和内存后端。生产模式必须配置 `LINKOS_DATA_DIR`、TLS、设备密钥、RBAC、审计持久化、内容寻址存储、插件受信公钥和隔离 Runner。
+统一开发启动器默认持久化，保留既有内存实例的复用能力。生产初始化生成管理员口令，局域网模式启用 HTTPS；官方插件随程序内嵌，外部插件仍需受信签名。Runner 按需配置，生产仅允许同主机 rootless 引擎。完整备份恢复、配置优先级和升级兼容条件见部署手册。
 
 产品 PRD 与落地方案见：`docs/prd/linkos-lan-collaboration-prd.md`。
 

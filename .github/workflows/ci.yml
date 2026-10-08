@@ -14,7 +14,7 @@ jobs:
           version: 9.15.5
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @linkos/web typecheck
@@ -45,7 +45,7 @@ jobs:
           version: 9.15.5
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: go test ./services/gateway/... ./services/runner/...
@@ -62,3 +62,68 @@ jobs:
       - run: go test ./services/runner/...
       - run: docker build -t linkos-runner-ci ./services/runner
       - run: docker run --rm --entrypoint sh linkos-runner-ci -c 'test "$(id -u)" -ne 0'
+
+  delivery-smoke:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux/amd64
+            binary: release/linkos-ci-linux-amd64/linkos
+          - os: windows-latest
+            target: windows/amd64
+            binary: release/linkos-ci-windows-amd64/linkos.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm run setup:dev
+      - run: pnpm test:launcher
+      - run: node scripts/smoke-dev.mjs
+      - run: node scripts/release.mjs --version ci --target ${{ matrix.target }}
+      - run: go test -tags release ./services/gateway/...
+      - run: node scripts/smoke-release.mjs ${{ matrix.binary }}
+        env:
+          LINKOS_SLOW_SMOKE: "1"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: delivery-${{ matrix.os }}
+          path: release/*.*
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    env:
+      LINKOS_IMAGE: linkos-ci:local
+      LINKOS_PORT: "18787"
+      LINKOS_SMOKE_PASSCODE: compose-smoke-generated-test-passcode-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: docker build -f services/gateway/Dockerfile -t linkos-ci:local .
+      - run: docker compose config --quiet
+      - run: docker compose run --rm --no-deps -e LINKOS_ADMIN_PASSCODE="$LINKOS_SMOKE_PASSCODE" gateway init --home /var/lib/linkos --lan --host 127.0.0.1 --public-url https://127.0.0.1:18787
+      - run: docker compose up -d --wait
+      - run: docker compose cp gateway:/var/lib/linkos/tls/ca.crt /tmp/linkos-ci-ca.crt
+      - run: node scripts/smoke-release.mjs --url https://127.0.0.1:18787 --compose-maintenance
+        env:
+          NODE_EXTRA_CA_CERTS: /tmp/linkos-ci-ca.crt
+          LINKOS_SLOW_SMOKE: "1"
+      - run: docker compose restart gateway && docker compose up -d --wait
+      - run: docker compose -f docker-compose.yml -f docker-compose.domain.yml config --quiet
+        env:
+          LINKOS_DOMAIN: linkos.example.test
+      - if: always()
+        run: docker compose logs --tail=100
+      - if: always()
+        run: docker compose down

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,7 +64,10 @@ func runnerAPIToken() string {
 	if token := strings.TrimSpace(os.Getenv("LINKOS_RUNNER_API_TOKEN")); token != "" {
 		return token
 	}
-	return strings.TrimSpace(os.Getenv("LINKOS_RUNNER_REGISTRATION_TOKEN"))
+	if os.Getenv("LINKOS_ENV") != "production" {
+		return strings.TrimSpace(os.Getenv("LINKOS_RUNNER_REGISTRATION_TOKEN"))
+	}
+	return ""
 }
 
 func newRunnerService() *runnerService {
@@ -78,6 +82,20 @@ func newRunnerService() *runnerService {
 	return &runnerService{jobs: make(map[string]*jobState), runnerID: id, image: image}
 }
 func (r *runnerService) engine() (string, error) {
+	if strings.EqualFold(os.Getenv("LINKOS_ENV"), "production") {
+		if runtime.GOOS != "linux" {
+			return "", errors.New("production Runner requires Linux or WSL2 and a local rootless engine")
+		}
+		for _, key := range []string{"DOCKER_HOST", "CONTAINER_HOST"} {
+			value := os.Getenv(key)
+			if value != "" && !strings.HasPrefix(value, "unix://") {
+				return "", errors.New("remote container engines cannot access Runner workspace paths; use a local Unix socket")
+			}
+		}
+		if os.Getenv("CONTAINER_CONNECTION") != "" {
+			return "", errors.New("remote Podman connections are unsupported")
+		}
+	}
 	for _, candidate := range []string{"docker", "podman"} {
 		if _, err := exec.LookPath(candidate); err != nil {
 			continue
@@ -86,6 +104,9 @@ func (r *runnerService) engine() (string, error) {
 		err := exec.CommandContext(ctx, candidate, "info").Run()
 		cancel()
 		if err == nil {
+			if strings.EqualFold(os.Getenv("LINKOS_ENV"), "production") && !rootlessEngine(candidate) {
+				continue
+			}
 			return candidate, nil
 		}
 	}

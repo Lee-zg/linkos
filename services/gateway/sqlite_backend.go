@@ -232,6 +232,10 @@ var sqliteMigrations = [][]string{
 		`ALTER TABLE uploads ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE uploads ADD COLUMN entry_id TEXT NOT NULL DEFAULT ''`,
 	},
+	{
+		`DROP TABLE IF EXISTS plugins`,
+		`DROP TABLE IF EXISTS plugin_versions`,
+	},
 }
 
 func (b *sqliteBackend) migrate() error {
@@ -246,6 +250,9 @@ func (b *sqliteBackend) migrate() error {
 	var current int
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
 		return err
+	}
+	if current > len(sqliteMigrations) {
+		return fmt.Errorf("database schema %d is newer than supported %d; incompatible rollback refused", current, len(sqliteMigrations))
 	}
 	for version, stmts := range sqliteMigrations {
 		number := version + 1

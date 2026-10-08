@@ -22,7 +22,11 @@ func localDiscoveryBeacon(source string) discoveryBeacon {
 		if tlsEnabled {
 			scheme = "https"
 		}
-		address = scheme + "://" + localIPv4() + ":8787"
+		_, port, err := net.SplitHostPort(os.Getenv("LINKOS_LISTEN"))
+		if err != nil {
+			_, port, _ = net.SplitHostPort(defaultConfig(defaultHome()).Listen)
+		}
+		address = scheme + "://" + net.JoinHostPort(localIPv4(), port)
 	}
 	id := strings.TrimSpace(os.Getenv("LINKOS_WORKSPACE_ID"))
 	if id == "" {
@@ -32,7 +36,7 @@ func localDiscoveryBeacon(source string) discoveryBeacon {
 	if name == "" {
 		name = "Nimbus Lab"
 	}
-	return discoveryBeacon{Protocol: "linkos-discovery/1", ID: id, Name: name, Address: address, Version: "0.1.0", TLS: tlsEnabled || strings.HasPrefix(address, "https://"), OnlineMembers: 0, At: time.Now().UTC(), Source: source}
+	return discoveryBeacon{Protocol: "linkos-discovery/1", ID: id, Name: name, Address: address, Version: buildVersion, TLS: tlsEnabled || strings.HasPrefix(address, "https://"), OnlineMembers: 0, At: time.Now().UTC(), Source: source}
 }
 
 func localIPv4() string {

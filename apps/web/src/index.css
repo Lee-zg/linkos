@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./desktop-experience.css";
 
 :root {
   --radius: 0.625rem;

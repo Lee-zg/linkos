@@ -4,6 +4,18 @@ export type ViewMode = "list" | "grid";
 export type SortField = "name" | "updatedAt" | "size";
 export type SortOrder = "asc" | "desc";
 
+export function selectFileRange(ids: string[], selected: Set<string>, id: string, anchor: string | null, toggle = false, range = false): Set<string> {
+  if (range && anchor && ids.includes(anchor)) {
+    const a = ids.indexOf(anchor), b = ids.indexOf(id);
+    if (b < 0) return selected;
+    return new Set([...(toggle ? selected : []), ...ids.slice(Math.min(a, b), Math.max(a, b) + 1)]);
+  }
+  if (!toggle) return new Set([id]);
+  const next = new Set(selected);
+  if (next.has(id)) next.delete(id); else next.add(id);
+  return next;
+}
+
 export interface FileBrowserPreferences {
   viewMode: ViewMode;
   sortField: SortField;

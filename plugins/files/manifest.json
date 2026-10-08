@@ -3,7 +3,7 @@
   "name": "文件",
   "version": "0.1.0",
   "apiVersion": "1.0",
-  "entry": { "ui": "ui/index.js", "service": "service/index.js" },
+  "entry": { "ui": "ui/index.html" },
   "contributes": {
     "routes": ["/files"],
     "commands": ["file.open", "file.upload"],

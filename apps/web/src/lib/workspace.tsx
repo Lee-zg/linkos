@@ -40,6 +40,7 @@ type Workspace = {
   lastSeq: number;
   resyncSeq: number;
   directoryVersion: number;
+  chatVersion: number;
   snapshot: WorkspaceSnapshot | null;
   lastEvent: SocketEvent | null;
   messages: Message[];
@@ -57,6 +58,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [lastEvent, setLastEvent] = useState<SocketEvent | null>(null);
   const [directoryVersion, setDirectoryVersion] = useState(0);
+  const [chatVersion, setChatVersion] = useState(0);
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
   const localMessageIds = useRef(new Set<string>());
   const messageCounter = useRef(0);
@@ -92,10 +94,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const onSocketEvent = useCallback((event: SocketEvent) => {
     setLastEvent(event);
+    if (event.type.startsWith("chat.")) setChatVersion(version => version + 1);
     if (event.type === "resources.changed") {
       setDirectoryVersion((version) => version + 1);
     }
     if (event.type === "chat.message.created") {
+      if (event.payload && typeof event.payload === "object" && "messageId" in event.payload) { void refetchMessages(); return; }
       const payload = event.payload as {
         body?: string;
         author?: string;
@@ -135,7 +139,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setJobStatus(payload.status);
       }
     }
-  }, []);
+  }, [refetchMessages]);
 
   const { connected, lastSeq, resyncSeq } = useWorkspaceSocket({
     onEvent: onSocketEvent,
@@ -203,6 +207,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       lastSeq,
       resyncSeq,
       directoryVersion,
+      chatVersion,
       snapshot,
       lastEvent,
       messages,
@@ -211,7 +216,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       currentJobId,
       runTask,
     }),
-    [connected, lastSeq, resyncSeq, directoryVersion, snapshot, lastEvent, messages, sendMessage, jobStatus, currentJobId, runTask],
+    [connected, lastSeq, resyncSeq, directoryVersion, chatVersion, snapshot, lastEvent, messages, sendMessage, jobStatus, currentJobId, runTask],
   );
   return (
       <WorkspaceContext.Provider value={value}>

@@ -74,6 +74,9 @@ func validateBackupFile(backupPath string) error {
 	if version < 1 {
 		return fmt.Errorf("backup schema version %d is not a gateway database", version)
 	}
+	if version > len(sqliteMigrations) {
+		return fmt.Errorf("backup schema %d is newer than supported %d", version, len(sqliteMigrations))
+	}
 	return nil
 }
 

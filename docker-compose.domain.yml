@@ -1,0 +1,21 @@
+# Requires Docker Compose >=2.24.4 for !override.
+services:
+  gateway:
+    ports: !override
+      - "127.0.0.1:${LINKOS_PORT:-8787}:8787"
+  caddy:
+    image: caddy:2.10-alpine
+    ports: ["80:80", "443:443"]
+    environment:
+      LINKOS_DOMAIN: ${LINKOS_DOMAIN:?Set LINKOS_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  caddy-data:
+  caddy-config:

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, getGatewayBase, listResources, type FileResource, type ResourceListing } from "../../lib/api";
-import { filePreferencesKey, parseFilePreferences, type FileBrowserPreferences, type SortField, type SortOrder, type ViewMode } from "../../lib/file-browser";
+import { filePreferencesKey, parseFilePreferences, selectFileRange, type FileBrowserPreferences, type SortField, type SortOrder, type ViewMode } from "../../lib/file-browser";
 import { useSession } from "../../lib/session";
 import { useWorkspace } from "../../lib/workspace";
 
@@ -46,6 +46,7 @@ export function useFileBrowser({ persistPreferences = true }: { persistPreferenc
   const online = useRef(connected);
   online.current = connected;
   const requestId = useRef(0);
+  const selectionAnchor = useRef<string | null>(null);
   const paths = useRef(new Map<string, Ancestor[]>([["", []]]));
   const update = useCallback((patch: Partial<FileBrowserState>) => {
     current.current = { ...current.current, ...patch };
@@ -175,7 +176,12 @@ export function useFileBrowser({ persistPreferences = true }: { persistPreferenc
   return {
     ...state, connected, navigateTo, goUp, goBack: () => travel(-1), goForward: () => travel(1),
     goToAncestor: (index: number) => navigateTo(index === 0 ? "" : current.current.ancestors[index - 1]?.id ?? ""),
-    select: (id: string) => update({ selectedIds: new Set([id]) }),
+    select: (id: string, toggle = false, range = false) => {
+      const s = current.current;
+      update({ selectedIds: selectFileRange(s.items.map(item => item.id), s.selectedIds, id, selectionAnchor.current, toggle, range) });
+      if (!range) selectionAnchor.current = id;
+    },
+    selectAll: () => update({ selectedIds: new Set(current.current.items.map(item => item.id)) }),
     clearSelection: () => update({ selectedIds: new Set() }),
     setViewMode: (viewMode: ViewMode) => update({ viewMode }),
     setSort, setSearch, setRecent, refresh, loadMore,

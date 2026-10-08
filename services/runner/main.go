@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -14,6 +17,22 @@ import (
 func main() {
 	log.SetFlags(0)
 	service := newRunnerService()
+	if len(os.Args) > 1 {
+		if os.Args[1] != "doctor" {
+			log.Fatal("usage: linkos-runner [doctor]")
+		}
+		os.Setenv("LINKOS_ENV", "production")
+		engine, err := service.engine()
+		if err != nil {
+			log.Fatal(err)
+		}
+		writeJSON := json.NewEncoder(os.Stdout)
+		_ = writeJSON.Encode(map[string]string{"engine": engine, "status": "ready", "workspace": "same-host rootless"})
+		return
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	go service.startGatewayHeartbeat(ctx)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		engine, err := service.engine()
@@ -45,18 +64,34 @@ func main() {
 	})
 	address := strings.TrimSpace(os.Getenv("LINKOS_LISTEN"))
 	if address == "" {
-		address = ":9797"
+		address = "127.0.0.1:9797"
 	}
 	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
+	go func() {
+		<-ctx.Done()
+		service.mu.Lock()
+		for _, job := range service.jobs {
+			if job.Cancel != nil {
+				job.Cancel()
+			}
+		}
+		service.mu.Unlock()
+		_ = server.Shutdown(context.Background())
+	}()
 	certFile, keyFile := strings.TrimSpace(os.Getenv("LINKOS_TLS_CERT_FILE")), strings.TrimSpace(os.Getenv("LINKOS_TLS_KEY_FILE"))
 	if (certFile == "") != (keyFile == "") {
 		log.Fatal("LINKOS_TLS_CERT_FILE and LINKOS_TLS_KEY_FILE must be configured together")
 	}
 	log.Printf(`{"level":"info","service":"runner","message":"listening","address":%q,"tls":%t}`, address, certFile != "")
 	if certFile != "" {
-		log.Fatal(server.ListenAndServeTLS(certFile, keyFile))
+		if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+		return
 	}
-	log.Fatal(server.ListenAndServe())
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
 func write(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -136,11 +137,13 @@ func (s *memoryEventStore) Retained() []event {
 const messageDedupRetention = 1000
 
 type hub struct {
-	mu        sync.Mutex
-	store     eventStore
-	clients   map[*websocket.Conn]*wsClient
-	seen      map[string]event
-	seenOrder []string
+	closing    bool
+	websockets sync.WaitGroup
+	mu         sync.Mutex
+	store      eventStore
+	clients    map[*websocket.Conn]*wsClient
+	seen       map[string]event
+	seenOrder  []string
 }
 
 type wsClient struct {
@@ -319,6 +322,13 @@ func (h *hub) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	client := &wsClient{queue: queue, filters: filters}
 	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	h.websockets.Add(1)
+	defer h.websockets.Done()
 	h.clients[conn] = client
 	currentSeq := h.store.CurrentSeq()
 	history, replayable := h.store.Since(lastSeq)
@@ -384,13 +394,13 @@ func systemEventID(kind string, seq int64) string {
 
 func main() {
 	log.SetFlags(0)
-	if len(os.Args) > 1 {
-		runMaintenanceCommand(os.Args[1:])
-		return
+	if err := runtimeCLI(os.Args[1:]); err != nil {
+		log.Print(err)
+		os.Exit(1)
 	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("LINKOS_ENV")), "production") && len(pluginTrustedKeys()) == 0 {
-		log.Fatal("LINKOS_PLUGIN_TRUSTED_KEYS is required when LINKOS_ENV=production")
-	}
+}
+
+func runGateway(ctx context.Context) error {
 	backend := openBackend()
 	defer backend.Close()
 	h := newHubWithStore(newMemoryEventStoreWithBackend(eventRetention, backend))
@@ -415,22 +425,29 @@ func main() {
 	mvp.contentDownload = uploads.content.handleDownload
 	mvp.content = uploads.content
 	if uploads.loadErr != nil {
-		log.Fatalf("initialize uploads: %v", uploads.loadErr)
+		return fmt.Errorf("initialize uploads: %w", uploads.loadErr)
 	}
 	if err := mvp.initializeFileStorage(uploads.content); err != nil {
-		log.Fatalf("initialize file storage: %v", err)
+		return fmt.Errorf("initialize file storage: %w", err)
 	}
+	if err := writePrivateJSON(filepath.Join(activeConfig.DataDir, "runtime-version.json"), map[string]string{"version": buildVersion, "commit": buildCommit}); err != nil {
+		return err
+	}
+	healthCtx, healthCancel := context.WithCancel(context.Background())
+	mvp.runtimeCtx = healthCtx
+	mvp.background.Add(1)
+	go func() { defer mvp.background.Done(); mvp.startPluginHealthChecker(healthCtx) }()
+	defer mvp.background.Wait()
+	defer healthCancel()
 	registerMVPAuth(mvp, auth)
 	uploads.auth = auth
 	uploads.committer = mvp
 	discovery := newDiscoveryService()
 	defer discovery.close()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, 200, map[string]interface{}{"status": "ok", "service": "gateway", "time": time.Now().UTC()})
-	})
+	registerRuntimeRoutes(mux, backend)
 	mux.HandleFunc("/api/v1/discovery", func(w http.ResponseWriter, _ *http.Request) {
-		workspaces := []interface{}{map[string]interface{}{"id": "demo", "name": "Nimbus Lab", "address": "http://127.0.0.1:8787", "version": "0.1.0", "onlineMembers": 12, "tls": false, "source": "gateway"}}
+		workspaces := []interface{}{localDiscoveryBeacon("gateway")}
 		for _, peer := range discovery.list() {
 			workspaces = append(workspaces, peer)
 		}
@@ -448,55 +465,40 @@ func main() {
 	if address == "" {
 		address = ":8787"
 	}
-	server := &http.Server{Addr: address, Handler: cors(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
+	mux.Handle("/", webHandler())
+	server := &http.Server{Addr: address, Handler: runtimeDeadlines(cors(mux)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute}
 	certFile, keyFile := strings.TrimSpace(os.Getenv("LINKOS_TLS_CERT_FILE")), strings.TrimSpace(os.Getenv("LINKOS_TLS_KEY_FILE"))
 	if (certFile == "") != (keyFile == "") {
 		log.Fatal("LINKOS_TLS_CERT_FILE and LINKOS_TLS_KEY_FILE must be configured together")
 	}
 	log.Printf(`{"level":"info","service":"gateway","message":"listening","address":%q,"tls":%t}`, server.Addr, certFile != "")
-	var serveErr error
-	if certFile != "" {
-		serveErr = server.ListenAndServeTLS(certFile, keyFile)
-	} else {
-		serveErr = server.ListenAndServe()
-	}
-	if serveErr != nil && serveErr != http.ErrServerClosed {
-		log.Fatal(serveErr)
-	}
-}
-
-// runMaintenanceCommand implements the offline backup/restore operations.
-// Both require LINKOS_DATA_DIR and run while the gateway is stopped, so the
-// snapshot or restored image is authoritative when the server starts again.
-func runMaintenanceCommand(args []string) {
-	dir := strings.TrimSpace(os.Getenv("LINKOS_DATA_DIR"))
-	if dir == "" {
-		log.Fatal("LINKOS_DATA_DIR must be set for backup/restore")
-	}
-	switch args[0] {
-	case "backup":
-		backend := openBackend()
-		defer backend.Close()
-		manifest, err := backend.backupTo(filepath.Join(dir, "backups"))
-		if err != nil {
-			log.Fatalf("backup: %v", err)
+	errCh := make(chan error, 1)
+	go func() {
+		if certFile != "" {
+			errCh <- server.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			errCh <- server.ListenAndServe()
 		}
-		raw, err := json.MarshalIndent(manifest, "", "  ")
-		if err != nil {
-			log.Fatalf("backup: %v", err)
+	}()
+	select {
+	case err := <-errCh:
+		if err != http.ErrServerClosed {
+			return err
 		}
-		fmt.Println(string(raw))
-	case "restore":
-		if len(args) != 2 {
-			log.Fatal("usage: gateway restore <backup-file>")
+	case <-ctx.Done():
+		// Hijacked WebSockets are not covered by http.Server.Shutdown.
+		h.mu.Lock()
+		h.closing = true
+		for conn := range h.clients {
+			_ = conn.Close()
 		}
-		if err := restoreBackup(dir, args[1]); err != nil {
-			log.Fatalf("restore: %v", err)
+		h.mu.Unlock()
+		if err := server.Shutdown(context.Background()); err != nil {
+			return err
 		}
-		log.Printf("restored %s to %s", args[1], filepath.Join(dir, "gateway.db"))
-	default:
-		log.Fatalf("unknown command %q (expected backup or restore <file>)", args[0])
+		h.websockets.Wait()
 	}
+	return nil
 }
 
 func simulateJob(h *hub, id string, spec map[string]interface{}) {
@@ -550,7 +552,8 @@ func cors(next http.Handler) http.Handler {
 				w.Header().Add("Vary", "Origin")
 			}
 		}
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Runner-Token, X-Request-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Runner-Token, X-Request-ID, X-Part-SHA256, Range")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, X-Trace-ID")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(204)

@@ -1,6 +1,14 @@
-node_modules
-dist
 .git
 .github
 *.log
-
+.local
+.gocache-*
+node_modules
+**/node_modules
+**/dist
+**/bundle
+release
+**/*.exe
+**/*.db*
+**/test-results*
+.env*

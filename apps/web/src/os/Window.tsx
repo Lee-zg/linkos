@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
 import { Minus, Square, X, Maximize2, Minimize2 } from "lucide-react";
 import type { WindowState } from "./types";
 import { getApp } from "./apps";
@@ -29,6 +29,19 @@ export function Window({ win }: { win: WindowState }) {
   const [closing, setClosing] = useState(false);
   const app = getApp(win.appId);
   const Content = app.component;
+
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    if (win.minimized) {
+      const target = document.querySelector<HTMLElement>(`[data-dock-app="${win.appId}"]`)?.getBoundingClientRect();
+      const x = win.maximized || isMobile ? window.innerWidth / 2 : win.x + win.w / 2;
+      const y = win.maximized || isMobile ? (window.innerHeight - 88) / 2 : win.y + win.h / 2;
+      frame.style.setProperty("--minimize-x", `${(target ? target.left + target.width / 2 : window.innerWidth / 2) - x}px`);
+      frame.style.setProperty("--minimize-y", `${(target ? target.top + target.height / 2 : window.innerHeight - 40) - y}px`);
+      frame.setAttribute("inert", "");
+    } else frame.removeAttribute("inert");
+  }, [win.minimized, win.appId, win.x, win.y, win.w, win.h, win.maximized, isMobile]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => setAppeared(true));
@@ -160,7 +173,7 @@ export function Window({ win }: { win: WindowState }) {
   return (
     <div
       ref={frameRef}
-      className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-background shadow-2xl transition-[opacity,transform] duration-150 motion-reduce:transition-none ${win.minimized ? "invisible" : ""} ${
+      className={`desktop-window pointer-events-auto absolute flex flex-col overflow-hidden bg-background shadow-2xl transition-[opacity,transform] duration-150 motion-reduce:transition-none ${win.minimized ? "is-minimized" : ""} ${
         fullscreen
           ? "inset-x-0 top-0 bottom-[88px] rounded-none border-0"
           : "rounded-xl border"

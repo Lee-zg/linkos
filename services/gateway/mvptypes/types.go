@@ -136,6 +136,10 @@ type RunnerInfo struct {
 	RevokedAt         string            `json:"revokedAt,omitempty"`
 }
 
+type PluginRunnerConfig struct {
+	Required bool `json:"required"`
+}
+
 type PluginManifest struct {
 	ID          string                 `json:"id"`
 	Name        string                 `json:"name"`
@@ -145,6 +149,7 @@ type PluginManifest struct {
 	Permissions []string               `json:"permissions"`
 	Contributes map[string][]string    `json:"contributes"`
 	Network     map[string]interface{} `json:"network,omitempty"`
+	Runner      *PluginRunnerConfig    `json:"runner,omitempty"`
 }
 
 type PluginRecord struct {

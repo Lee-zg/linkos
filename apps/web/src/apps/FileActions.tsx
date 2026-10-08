@@ -9,7 +9,7 @@ const buttonClass = "rounded-md border px-3 py-1.5 text-xs hover:bg-muted disabl
 const primaryClass = "rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background disabled:opacity-40";
 const errorText = (error: unknown) => error instanceof Error ? error.message : "操作失败";
 
-function Modal({ title, busy = false, onClose, children, alert = false }: {
+export function Modal({ title, busy = false, onClose, children, alert = false }: {
   title: string; busy?: boolean; onClose: () => void; children: ReactNode; alert?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -18,8 +18,8 @@ function Modal({ title, busy = false, onClose, children, alert = false }: {
   useLayoutEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const panel = ref.current!;
-    const focusable = () => [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex="0"]')];
-    const initial = panel.querySelector<HTMLElement>("[data-initial-focus]") ?? panel.querySelector<HTMLInputElement>("input") ?? focusable()[0] ?? panel;
+    const focusable = () => [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), textarea:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex="0"]')];
+    const initial = panel.querySelector<HTMLElement>("[data-initial-focus]") ?? panel.querySelector<HTMLElement>("input, textarea") ?? focusable()[0] ?? panel;
     initial.focus();
     if (initial instanceof HTMLInputElement) initial.select();
     const onFocus = (event: FocusEvent) => {

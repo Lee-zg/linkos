@@ -120,6 +120,12 @@ func defaultUploadRoot() string {
 	if root := strings.TrimSpace(os.Getenv("LINKOS_UPLOAD_DIR")); root != "" {
 		return root
 	}
+	if root := strings.TrimSpace(os.Getenv("LINKOS_DATA_DIR")); root != "" {
+		return filepath.Join(root, "uploads")
+	}
+	if root := strings.TrimSpace(os.Getenv("LINKOS_DATA_DIR")); root != "" {
+		return filepath.Join(root, "uploads")
+	}
 	return filepath.Join(os.TempDir(), "linkos-uploads")
 }
 

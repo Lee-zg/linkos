@@ -52,6 +52,12 @@ async function chooseLocation(page: Page, name: string) {
   await files.getByRole("button", { name, exact: true }).click();
 }
 
+async function mockPersonalLocations(page: Page) {
+  await page.route("**/api/v1/file-preferences", route => route.fulfill({ json: {
+    downloadsId: "downloads", inboxId: "personal", trashId: "trash", outgoingId: "outgoing", receiveFolderId: "downloads",
+  } }));
+}
+
 test("server ancestors drive real path and up navigation, not visit history", async ({ page }) => {
   await page.route("**/api/v1/resources?*", async route => {
     const parent = new URL(route.request().url()).searchParams.get("parentId");
@@ -75,7 +81,7 @@ for (const parentWritable of [false, true]) test(`location and object capabiliti
   await expect(files.getByRole("button", { name: "新建文件夹", exact: true })).toBeDisabled();
   await expect(files.getByRole("button", { name: "上传文件", exact: true })).toBeDisabled();
   await files.getByRole("button", { name: "更多操作 只读文件", exact: true }).click();
-  for (const name of ["重命名", "删除", "移动到..."]) await expect(page.getByRole("menuitem", { name, exact: true })).toBeDisabled();
+  for (const name of ["重命名", "移到废纸篓", "移动到..."]) await expect(page.getByRole("menuitem", { name, exact: true })).toBeDisabled();
 });
 
 test("grid paginates without client reordering and keeps search across views", async ({ page }) => {
@@ -203,13 +209,15 @@ test("resource refresh preserves open name form and changed path", async ({ page
 });
 
 test("delete errors stay visible and submission cannot dismiss the modal", async ({ page }) => {
+  await mockPersonalLocations(page);
   await page.route("**/api/v1/resources?*", route => route.fulfill({ json: listing([resource("delete", "待删除", "file")]) }));
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   await page.route("**/api/v1/resources/delete?*", async route => { await gate; await route.fulfill({ status: 403, json: { error: "FORBIDDEN", message: "无法删除测试" } }); });
   const files = await openFiles(page);
+  await chooseLocation(page, "废纸篓");
   await files.getByRole("button", { name: "更多操作 待删除", exact: true }).click();
-  await page.getByRole("menuitem", { name: "删除", exact: true }).click();
+  await page.getByRole("menuitem", { name: "永久删除", exact: true }).click();
   const dialog = page.getByRole("alertdialog", { name: "确认删除" });
   await dialog.getByRole("button", { name: "删除", exact: true }).click();
   await page.keyboard.press("Escape");
@@ -345,16 +353,21 @@ test("Enter, Shift F10 and Delete share the object commands", async ({ page }) =
   const folder = files.getByRole("row", { name: "键盘目录", exact: true });
   await folder.focus();
   await folder.press("Enter");
+  await expect(page.getByRole("dialog", { name: "重命名", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(folder).toBeFocused();
+  await folder.press("Control+ArrowDown");
   const file = files.getByRole("row", { name: "键盘文件", exact: true });
   await file.focus();
   await file.press("Shift+F10");
   await expect(page.getByRole("menuitem", { name: "下载", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(file).toBeFocused();
+  let operation: unknown;
+  await page.route("**/api/v1/file-operations", route => { operation = route.request().postDataJSON(); return route.fulfill({ json: { items: [] } }); });
   await file.press("Delete");
-  await expect(page.getByRole("alertdialog", { name: "确认删除" })).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(file).toBeFocused();
+  await expect.poll(() => operation).toEqual({ action: "trash", ids: ["keyfile"] });
+  await expect(page.getByRole("alertdialog", { name: "确认删除" })).toHaveCount(0);
 });
 
 test("information resolves the real resource path rather than visit history", async ({ page }) => {
@@ -559,10 +572,12 @@ test("390px locations drawer exposes real reachable navigation", async ({ page }
 });
 
 test("delete starts on cancel and Enter safely cancels", async ({ page }) => {
+  await mockPersonalLocations(page);
   let deletes = 0;
   await page.route("**/api/v1/resources?*", route => route.fulfill({ json: listing([resource("safe", "安全删除", "file")]) }));
   await page.route("**/api/v1/resources/safe?*", route => { deletes++; return route.fulfill({ json: {} }); });
   const files = await openFiles(page);
+  await chooseLocation(page, "废纸篓");
   const item = files.getByRole("row", { name: "安全删除", exact: true });
   await item.focus();
   await item.press("Delete");

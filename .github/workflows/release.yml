@@ -1,0 +1,145 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without v
+        required: true
+permissions:
+  contents: write
+  packages: write
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: go test ./services/gateway/... ./services/runner/...
+      - run: pnpm --filter @linkos/web typecheck
+      - name: Build packages
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${REQUESTED_VERSION:-${GITHUB_REF_NAME#v}}"
+          node scripts/release.mjs --version "$VERSION"
+          echo "LINKOS_RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - run: node scripts/smoke-release.mjs "release/linkos-${LINKOS_RELEASE_VERSION}-linux-amd64/linkos"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: |
+            release/*.zip
+            release/*.tar.gz
+            release/SHA256SUMS
+            release/manifest.json
+  windows-package:
+    needs: packages
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: release
+      - shell: pwsh
+        run: |
+          $archive = Get-ChildItem release/*windows-amd64.zip | Select-Object -First 1
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath release/windows-smoke
+          node scripts/smoke-release.mjs release/windows-smoke/linkos.exe
+  image:
+    needs: [packages, windows-package, container-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          file: services/gateway/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.packages.outputs.version }}
+            COMMIT=${{ github.sha }}
+      - run: echo 'Image digest ${{ steps.build.outputs.digest }}' >> "$GITHUB_STEP_SUMMARY"
+      - name: Save immutable image reference
+        run: echo "ghcr.io/${GITHUB_REPOSITORY,,}@${{ steps.build.outputs.digest }}" > image-digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-digest
+          path: image-digest.txt
+  container-smoke:
+    needs: [packages, windows-package]
+    runs-on: ubuntu-latest
+    env:
+      LINKOS_IMAGE: linkos-release-smoke:local
+      LINKOS_PORT: "18787"
+      LINKOS_SMOKE_PASSCODE: release-compose-test-passcode-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: docker build -f services/gateway/Dockerfile --build-arg VERSION=${{ needs.packages.outputs.version }} --build-arg COMMIT=${{ github.sha }} -t linkos-release-smoke:local .
+      - run: docker compose run --rm --no-deps -e LINKOS_ADMIN_PASSCODE="$LINKOS_SMOKE_PASSCODE" gateway init --home /var/lib/linkos --lan --host 127.0.0.1 --public-url https://127.0.0.1:18787
+      - run: docker compose up -d --wait
+      - run: docker compose cp gateway:/var/lib/linkos/tls/ca.crt /tmp/linkos-release-ca.crt
+      - run: node scripts/smoke-release.mjs --url https://127.0.0.1:18787 --compose-maintenance
+        env:
+          NODE_EXTRA_CA_CERTS: /tmp/linkos-release-ca.crt
+      - if: always()
+        run: docker compose logs --tail=100
+      - if: always()
+        run: docker compose down
+  publish:
+    needs: [packages, windows-package, image]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-image-digest
+          path: release
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/*.zip release/*.tar.gz release/SHA256SUMS release/manifest.json release/image-digest.txt --verify-tag --generate-notes

@@ -17,7 +17,7 @@ async function openApp(page: import("@playwright/test").Page, name: string) {
 test("chat search and message thread surface", async ({ page }) => {
   await openApp(page, "聊天");
   await expect(page.getByLabel("搜索消息")).toBeVisible();
-  await page.getByPlaceholder(/发送到/).fill("playwright smoke message");
+  await page.getByLabel("消息输入").fill("playwright smoke message");
   await page.getByRole("button", { name: "发送消息" }).click();
   await expect(page.getByText("playwright smoke message").first()).toBeVisible();
 });

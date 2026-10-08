@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
@@ -35,6 +36,8 @@ type mvpBlobBackend interface {
 }
 
 type mvpState struct {
+	FilePreferences          map[string]filePreferences            `json:"filePreferences,omitempty"`
+	MessageReceipts          map[string][]string                   `json:"messageReceipts,omitempty"`
 	Resources                map[string]protocol.ResourceRecord    `json:"resources"`
 	Shares                   map[string]protocol.ResourceShareLink `json:"shares"`
 	LegacyFilesInitialized   bool                                  `json:"legacyFilesInitialized"`
@@ -76,6 +79,8 @@ type mvpJob struct {
 }
 
 type mvpStore struct {
+	runtimeCtx      context.Context
+	background      sync.WaitGroup
 	mu              sync.RWMutex
 	backend         persistBackend
 	hub             *hub
@@ -446,12 +451,14 @@ func isPluginID(id string) bool {
 }
 
 func (s *mvpStore) loadPluginManifestsLocked() {
-	root := strings.TrimSpace(os.Getenv("LINKOS_PLUGIN_DIR"))
-	if root == "" {
-		root = filepath.Join("..", "..", "plugins")
+	s.loadBuiltinPluginsLocked()
+	if bundledAssets != nil && strings.TrimSpace(os.Getenv("LINKOS_PLUGIN_DIR")) == "" {
+		return
 	}
+	root := pluginRoot()
 	entries, err := os.ReadDir(root)
 	if err != nil {
+		log.Printf("plugin directory %q: %v", root, err)
 		return
 	}
 	keys := pluginTrustedKeys()
@@ -466,10 +473,12 @@ func (s *mvpStore) loadPluginManifestsLocked() {
 		manifestPath := filepath.Join(root, entry.Name(), "manifest.json")
 		raw, err := os.ReadFile(manifestPath)
 		if err != nil {
+			log.Printf("plugin manifest %s: %v", manifestPath, err)
 			continue
 		}
 		var manifest protocol.PluginManifest
 		if json.Unmarshal(raw, &manifest) != nil || len(validatePluginManifest(manifest)) > 0 {
+			log.Printf("plugin manifest %s: invalid or unparseable", manifestPath)
 			continue
 		}
 		signature := ""
@@ -490,11 +499,7 @@ func (s *mvpStore) loadPluginManifestsLocked() {
 }
 
 func mapEntry(id string) map[string]string {
-	entry := map[string]string{"ui": "ui/index.js", "service": "service/index.js"}
-	if id == "runner.exec" {
-		entry["runner"] = "runner/index.js"
-	}
-	return entry
+	return map[string]string{"ui": "ui/index.html"}
 }
 
 func mapContributes(id string) map[string][]string {
@@ -539,7 +544,7 @@ func (s *mvpStore) listChannels() []protocol.ChatChannel {
 }
 
 func channelAllows(principal authPrincipal, channel protocol.ChatChannel) bool {
-	if channel.Kind != "direct" || len(channel.MemberIDs) == 0 || principal.Role == roleAdmin || principal.Role == "owner" {
+	if channel.Kind != "direct" {
 		return true
 	}
 	for _, memberID := range channel.MemberIDs {
@@ -566,6 +571,10 @@ func (s *mvpStore) listMessages(channelID, query, cursor string, limit int) (ite
 }
 
 func (s *mvpStore) listMessagesFiltered(channelID, authorID, query, from, to, cursor string, limit int) (items []protocol.ChatMessage, next string) {
+	return s.listMessagePage(channelID, authorID, query, from, to, cursor, limit, "", false)
+}
+
+func (s *mvpStore) listMessagePage(channelID, authorID, query, from, to, cursor string, limit int, threadID string, newest bool) (items []protocol.ChatMessage, next string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if limit < 1 || limit > 200 {
@@ -583,6 +592,9 @@ func (s *mvpStore) listMessagesFiltered(channelID, authorID, query, from, to, cu
 		}
 	}
 	for _, msg := range s.state.Messages {
+		if threadID != "" && msg.ID != threadID && msg.ThreadID != threadID {
+			continue
+		}
 		if channelID != "" && msg.ChannelID != channelID {
 			continue
 		}
@@ -610,6 +622,9 @@ func (s *mvpStore) listMessagesFiltered(channelID, authorID, query, from, to, cu
 		items = append(items, msg)
 	}
 	sort.Slice(items, func(i, j int) bool {
+		if newest {
+			i, j = j, i
+		}
 		if items[i].CreatedAt == items[j].CreatedAt {
 			return items[i].ID < items[j].ID
 		}
@@ -845,6 +860,7 @@ func (s *mvpStore) setPluginStatus(id string, status protocol.PluginStatus) (pro
 		item.APIVersion = previous.Manifest.APIVersion
 		item.Permissions = previous.Manifest.Permissions
 		item.Status = previous.Status
+		item.Health = "healthy"
 		item.Previous = nil
 	} else if status == "rollback" {
 		item.Status = "disabled"
@@ -881,9 +897,13 @@ func principalForRequest(auth *authStore, r *http.Request) (authPrincipal, bool)
 func registerMVPRoutes(mux *http.ServeMux, auth *authStore, store *mvpStore) {
 	active := func(handler http.HandlerFunc) http.HandlerFunc { return requireActive(auth, "demo", handler) }
 	mux.HandleFunc("/api/v1/resources", active(store.handleFilesResources))
+	mux.HandleFunc("/api/v1/file-preferences", active(store.handleFilePreferences))
+	mux.HandleFunc("/api/v1/file-operations", active(store.handleFileOperations))
+	mux.HandleFunc("/api/v1/chat-receipts/", active(store.handleChatReceipt))
 	mux.HandleFunc("/api/v1/resources/", active(store.handleFilesResourceItem))
 	mux.HandleFunc("/api/v1/shares/", store.handleShare)
 	mux.HandleFunc("/api/v1/channels", active(store.handleChannels))
+	mux.HandleFunc("/api/v1/chat-members", active(store.handleChatMembers))
 	mux.HandleFunc("/api/v1/channels/", active(store.handleChannelItem))
 	mux.HandleFunc("/api/v1/messages", active(store.handleMessages))
 	mux.HandleFunc("/api/v1/messages/", active(store.handleMessageItem))
@@ -894,7 +914,14 @@ func registerMVPRoutes(mux *http.ServeMux, auth *authStore, store *mvpStore) {
 	mux.HandleFunc("/api/v1/runners/heartbeat", store.handleRunnerHeartbeat)
 	mux.HandleFunc("/api/v1/runners/", active(store.handleRunnerItem))
 	mux.HandleFunc("/api/v1/plugins", active(store.handlePlugins))
-	mux.HandleFunc("/api/v1/plugins/", active(store.handlePluginItem))
+	mux.HandleFunc("/api/v1/plugins/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/"), "/content/", 2)
+		if len(parts) == 2 && !strings.Contains(parts[0], "/") {
+			store.handlePluginContent(w, r, parts[0], parts[1])
+			return
+		}
+		active(store.handlePluginItem)(w, r)
+	})
 	mux.HandleFunc("/api/v1/metrics", active(store.handleMetrics))
 }
 
@@ -1028,16 +1055,61 @@ func (s *mvpStore) handleChannels(w http.ResponseWriter, r *http.Request) {
 		}
 		if input.Kind != "direct" {
 			input.Kind = "channel"
+			input.MemberIDs = nil
+		} else {
+			members := map[string]bool{principal.UserID: true}
+			known := map[string]bool{}
+			if auth := s.authFromHub(); auth != nil {
+				for _, member := range auth.listMembers() {
+					if member.Status == accessStatusActive {
+						known[member.UserID] = true
+					}
+				}
+			}
+			for _, memberID := range input.MemberIDs {
+				if !known[memberID] {
+					writeAPIError(w, 400, "INVALID_REQUEST", "unknown member")
+					return
+				}
+				members[memberID] = true
+			}
+			if len(members) < 2 || len(members) > 32 {
+				writeAPIError(w, 400, "INVALID_REQUEST", "private conversations require 2 to 32 members")
+				return
+			}
+			input.MemberIDs = []string{}
+			for memberID := range members {
+				input.MemberIDs = append(input.MemberIDs, memberID)
+			}
+			sort.Strings(input.MemberIDs)
+			digest := sha256.Sum256([]byte(strings.Join(input.MemberIDs, "\x00")))
+			id = fmt.Sprintf("direct_%x", digest[:16])
 		}
 		s.mu.Lock()
-		if _, exists := s.state.Channels[id]; exists {
+		if existing, exists := s.state.Channels[id]; exists {
 			s.mu.Unlock()
+			if input.Kind == "direct" {
+				writeJSON(w, 200, existing)
+				return
+			}
 			writeAPIError(w, 409, "INVALID_REQUEST", "channel already exists")
 			return
 		}
 		item := protocol.ChatChannel{ID: id, WorkspaceID: "demo", Name: input.Name, Kind: input.Kind, MemberIDs: input.MemberIDs, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-		s.state.Channels[id] = item
-		s.persistLocked()
+		candidate := s.directoryCandidateLocked()
+		candidate.Channels = make(map[string]protocol.ChatChannel, len(s.state.Channels)+1)
+		for key, value := range s.state.Channels {
+			candidate.Channels[key] = value
+		}
+		candidate.Channels[id] = item
+		if err := s.saveDirectoryCandidateLocked(candidate); err != nil {
+			s.mu.Unlock()
+			writeAPIError(w, 500, "INTERNAL_ERROR", "could not create conversation")
+			return
+		}
+		if s.hub != nil {
+			s.hub.emit("chat.channels.changed", map[string]interface{}{})
+		}
 		s.mu.Unlock()
 		s.recordMutation(r, principal, "channel.create", id, input.Kind)
 		writeJSON(w, 201, item)
@@ -1098,7 +1170,16 @@ func (s *mvpStore) handleMessages(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		items, next := s.listMessagesFiltered(channelID, r.URL.Query().Get("authorId"), r.URL.Query().Get("q"), r.URL.Query().Get("from"), r.URL.Query().Get("to"), r.URL.Query().Get("cursor"), parseLimit(r.URL.Query().Get("limit")))
+		items, next := s.listMessagePage(channelID, r.URL.Query().Get("authorId"), r.URL.Query().Get("q"), r.URL.Query().Get("from"), r.URL.Query().Get("to"), r.URL.Query().Get("cursor"), parseLimit(r.URL.Query().Get("limit")), "", r.URL.Query().Get("newest") == "true")
+		s.mu.RLock()
+		visible := make([]protocol.ChatMessage, 0, len(items))
+		for _, message := range items {
+			if channel, ok := s.state.Channels[message.ChannelID]; ok && channelAllows(principal, channel) {
+				visible = append(visible, message)
+			}
+		}
+		s.mu.RUnlock()
+		items = visible
 		if r.URL.Query().Get("q") != "" {
 			messageSearchRequests.Add(1)
 			messageSearchNanos.Add(time.Since(started).Nanoseconds())
@@ -1110,42 +1191,7 @@ func (s *mvpStore) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
 		return
 	}
-	principal, _ := principalForRequest(s.authFromHub(), r)
-	if !roleAllows(principal.Role, "chat.send") {
-		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "chat.send permission required")
-		return
-	}
-	var input protocol.MessageCreateInput
-	if json.NewDecoder(r.Body).Decode(&input) != nil || strings.TrimSpace(input.Body) == "" || strings.TrimSpace(input.ChannelID) == "" {
-		writeAPIError(w, 400, "INVALID_REQUEST", "body and channelId are required")
-		return
-	}
-	s.mu.RLock()
-	channel, exists := s.state.Channels[input.ChannelID]
-	s.mu.RUnlock()
-	if !exists {
-		writeAPIError(w, http.StatusNotFound, "INVALID_REQUEST", "channel not found")
-		return
-	}
-	if !channelAllows(principal, channel) {
-		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "channel membership required")
-		return
-	}
-	if input.ClientMsgID == "" {
-		input.ClientMsgID = ""
-	}
-	e, duplicate := s.hub.publishMessage(strings.TrimSpace(input.Body), input.ChannelID, input.ClientMsgID)
-	if !duplicate {
-		s.addMessage(protocol.ChatMessage{ID: e.EventID, ChannelID: input.ChannelID, ThreadID: input.ThreadID, AuthorID: principal.UserID, AuthorName: principal.DisplayName, Body: input.Body, Blocks: input.Blocks, Mentions: input.Mentions, ClientMsgID: input.ClientMsgID, CreatedAt: e.TS, Version: 1})
-		s.recordMutation(r, principal, "message.create", e.EventID, input.ChannelID)
-	}
-	status := http.StatusCreated
-	state := "accepted"
-	if duplicate {
-		status = http.StatusOK
-		state = "duplicate"
-	}
-	writeJSON(w, status, protocol.AcceptedMessage{MessageID: e.EventID, ServerMsgID: e.EventID, Seq: e.Seq, Status: state})
+	s.handleComposeMessage(w, r)
 }
 
 // authFromHub is replaced by registerMVPAuth when the routes are installed.
@@ -1194,7 +1240,7 @@ func (s *mvpStore) handleMessageItem(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "channel membership required")
 			return
 		}
-		items, _ := s.listMessages("", "", "", 200)
+		items, _ := s.listMessagePage(root.ChannelID, "", "", "", "", "", 200, id, false)
 		filtered := make([]protocol.ChatMessage, 0)
 		for _, m := range items {
 			if m.ThreadID == id || m.ID == id {
@@ -1202,6 +1248,15 @@ func (s *mvpStore) handleMessageItem(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, 200, map[string]interface{}{"items": filtered})
+		return
+	}
+	principal, _ := principalForRequest(s.authFromHub(), r)
+	s.mu.RLock()
+	original, exists := s.state.Messages[path]
+	channel := s.state.Channels[original.ChannelID]
+	s.mu.RUnlock()
+	if exists && !channelAllows(principal, channel) {
+		writeAPIError(w, 403, "FORBIDDEN", "channel membership required")
 		return
 	}
 	switch r.Method {
@@ -1234,14 +1289,13 @@ func (s *mvpStore) handleMessageItem(w http.ResponseWriter, r *http.Request) {
 		}
 		updated, ok := s.updateMessage(path, func(m *protocol.ChatMessage) {
 			m.Body = input.Body
-			m.Blocks = input.Blocks
 			m.EditedAt = time.Now().UTC().Format(time.RFC3339)
 		})
 		if !ok {
 			writeAPIError(w, 404, "INVALID_REQUEST", "message not found")
 			return
 		}
-		s.hub.emit("chat.message.updated", updated)
+		s.hub.emit("chat.message.updated", map[string]string{"messageId": updated.ID})
 		s.recordMutation(r, principal, "message.update", path, updated.ChannelID)
 		writeJSON(w, 200, updated)
 	case http.MethodDelete:
@@ -1731,6 +1785,10 @@ func (s *mvpStore) handlePluginItem(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "plugin not found")
 		return
 	}
+	if len(parts) > 1 && parts[1] == "content" {
+		s.handlePluginContent(w, r, id, strings.Join(parts[2:], "/"))
+		return
+	}
 	status := ""
 	if len(parts) > 1 {
 		status = parts[1]
@@ -1808,6 +1866,97 @@ func (s *mvpStore) handlePluginItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, item)
 }
 
+func (s *mvpStore) handlePluginContent(w http.ResponseWriter, r *http.Request, pluginID string, filePath string) {
+	if r.Method != http.MethodGet {
+		writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
+		return
+	}
+	s.mu.RLock()
+	pluginRecord, exists := s.state.Plugins[pluginID]
+	s.mu.RUnlock()
+	if !exists {
+		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "plugin not found")
+		return
+	}
+	if !validPluginAssetPath(filePath) {
+		writeAPIError(w, 400, "INVALID_REQUEST", "invalid plugin path")
+		return
+	}
+	data, err := readPluginAsset(pluginID, filePath, pluginRecord.Signature)
+	if err != nil {
+		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "file not found")
+		return
+	}
+	w.Header().Set("Content-Type", guessContentType(filePath))
+	w.Write(data)
+}
+
+func pluginDirName(id string) string {
+	if idx := strings.Index(id, "."); idx > 0 {
+		return id[:idx]
+	}
+	return id
+}
+
+func guessContentType(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".html"):
+		return "text/html; charset=utf-8"
+	case strings.HasSuffix(path, ".js"):
+		return "application/javascript"
+	case strings.HasSuffix(path, ".css"):
+		return "text/css"
+	case strings.HasSuffix(path, ".json"):
+		return "application/json"
+	case strings.HasSuffix(path, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(path, ".png"):
+		return "image/png"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func (s *mvpStore) checkPluginHealth() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, rec := range s.state.Plugins {
+		if rec.Status != "enabled" {
+			continue
+		}
+		uiEntry := rec.Manifest.Entry["ui"]
+		if uiEntry == "" {
+			continue
+		}
+		_, err := readPluginAsset(id, uiEntry, rec.Signature)
+		healthy := err == nil
+		if healthy && rec.Health == "degraded" {
+			rec.Health = "healthy"
+			s.state.Plugins[id] = rec
+			s.persistLocked()
+			s.hub.emit("plugin.updated", rec)
+		} else if !healthy && rec.Health != "degraded" {
+			rec.Health = "degraded"
+			s.state.Plugins[id] = rec
+			s.persistLocked()
+			s.hub.emit("plugin.updated", rec)
+		}
+	}
+}
+
+func (s *mvpStore) startPluginHealthChecker(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkPluginHealth()
+		}
+	}
+}
+
 func (s *mvpStore) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
@@ -1862,7 +2011,7 @@ func runMVPJob(store *mvpStore, id string) {
 	payload, _ := json.Marshal(map[string]interface{}{"id": id, "projectId": job.Spec.ProjectID, "command": job.Spec.Command, "timeoutSeconds": job.Spec.TimeoutSeconds, "memoryMb": job.Spec.MemoryMb, "network": job.Spec.Network, "env": job.Spec.Env, "files": files, "artifactGlobs": job.Spec.ArtifactGlobs})
 	request, _ := http.NewRequest(http.MethodPost, endpoint+"/jobs", bytes.NewReader(payload))
 	request.Header.Set("content-type", "application/json")
-	if token := strings.TrimSpace(os.Getenv("LINKOS_RUNNER_REGISTRATION_TOKEN")); token != "" {
+	if token := runnerRequestToken(); token != "" {
 		request.Header.Set("X-Runner-Token", token)
 	}
 	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
@@ -1901,6 +2050,9 @@ func runMVPJob(store *mvpStore, id string) {
 	}
 	deadline := time.Now().Add(time.Duration(timeoutSeconds+10) * time.Second)
 	for time.Now().Before(deadline) {
+		if store.runtimeCtx != nil && store.runtimeCtx.Err() != nil {
+			return
+		}
 		current, exists := store.getJob(id)
 		if !exists || current.Cancel {
 			return
@@ -1942,7 +2094,7 @@ func fetchRunnerArtifacts(endpoint, id string) []struct {
 	if err != nil {
 		return nil
 	}
-	if token := strings.TrimSpace(os.Getenv("LINKOS_RUNNER_REGISTRATION_TOKEN")); token != "" {
+	if token := runnerRequestToken(); token != "" {
 		request.Header.Set("X-Runner-Token", token)
 	}
 	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
@@ -2007,7 +2159,7 @@ func (s *mvpStore) ingestRunnerArtifacts(endpoint, jobID string) {
 func fetchRunnerJob(endpoint, id string) (protocol.JobStatus, []protocol.JobLogChunk) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	request, _ := http.NewRequest(http.MethodGet, endpoint+"/jobs/"+url.PathEscape(id), nil)
-	if token := strings.TrimSpace(os.Getenv("LINKOS_RUNNER_REGISTRATION_TOKEN")); token != "" {
+	if token := runnerRequestToken(); token != "" {
 		request.Header.Set("X-Runner-Token", token)
 	}
 	response, err := client.Do(request)
@@ -2054,7 +2206,8 @@ func handleJobRoutes(mux *http.ServeMux, auth *authStore, store *mvpStore) {
 		ref := store.createJob(spec, p.UserID)
 		store.recordMutation(r, p, "job.submit", ref.ID, spec.ProjectID)
 		store.hub.emit("job.status.changed", ref)
-		go runMVPJob(store, ref.ID)
+		store.background.Add(1)
+		go func() { defer store.background.Done(); runMVPJob(store, ref.ID) }()
 		writeJSON(w, 202, ref)
 	}))
 	mux.HandleFunc("/api/v1/jobs/", active(func(w http.ResponseWriter, r *http.Request) {
@@ -2092,7 +2245,7 @@ func handleJobRoutes(mux *http.ServeMux, auth *authStore, store *mvpStore) {
 			store.hub.emit("job.status.changed", ref)
 			if endpoint := strings.TrimRight(strings.TrimSpace(os.Getenv("LINKOS_RUNNER_URL")), "/"); endpoint != "" {
 				if request, err := http.NewRequest(http.MethodPost, endpoint+"/jobs/"+url.PathEscape(id)+"/cancel", nil); err == nil {
-					if token := strings.TrimSpace(os.Getenv("LINKOS_RUNNER_REGISTRATION_TOKEN")); token != "" {
+					if token := runnerRequestToken(); token != "" {
 						request.Header.Set("X-Runner-Token", token)
 					}
 					go func() {

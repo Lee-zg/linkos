@@ -6,7 +6,12 @@ import { isEditableElement } from "../os/context-menu";
 import { downloadResource, loadUploadedFiles, rememberUploadedFile, uploadFile, type UploadedFileRecord, type UploadProgress } from "../lib/uploads";
 import { useFileBrowser, type SortField } from "./files/useFileBrowser";
 import { canGoBack, canGoForward, fileTransferPercent, formatFileSize, formatRelativeTime } from "../lib/file-browser";
-import { createFolder, deleteResource, getResource, listResources, moveResource, updateResource, type FileResource } from "../lib/api";
+import { createFolder, deleteResource, getResource, getFilePreferences, operateFiles, listResources, moveResource, updateResource, type FileResource } from "../lib/api";
+import type { FilePreferences } from "@linkos/protocol";
+import { Clock, Copy, Eye, HardDrive, ClipboardPaste, Undo2 } from "lucide-react";
+import { QuickLook } from "./files/QuickLook";
+import { FolderPicker } from "./files/FolderPicker";
+import { subscribeFileLocation } from "../lib/file-intent";
 import { DeleteConfirm, InfoPanel, MoveDialog, NameForm } from "./FileActions";
 
 interface TransferState { key: string; name: string; progress: UploadProgress; error?: string }
@@ -15,7 +20,9 @@ type ModalState =
   | { type: "none" }
   | { type: "createFolder"; parentId: string }
   | { type: "rename" | "delete" | "move"; resource: FileResource }
-  | { type: "info"; resource: FileResource; path?: string; pathError?: string };
+  | { type: "info"; resource: FileResource; path?: string; pathError?: string }
+  | { type: "preview"; resource: FileResource }
+  | { type: "batch-move"; ids: string[] };
 type Command = "open" | "rename" | "delete" | "move" | "info" | "new-folder" | "upload" | "refresh";
 const iconButton = "grid h-8 w-8 shrink-0 place-items-center rounded-md border-none bg-transparent text-muted-foreground hover:bg-muted focus-visible:outline disabled:opacity-40";
 const tabs: Array<{ key: Tab; label: string }> = [
@@ -42,6 +49,22 @@ export function FilesApp() {
   const [records, setRecords] = useState<UploadedFileRecord[]>(() => loadUploadedFiles());
   const [transfers, setTransfers] = useState<TransferState[]>([]);
   const [locationsOpen, setLocationsOpen] = useState(false);
+  const [preferences, setPreferences] = useState<FilePreferences | null>(null);
+  const [clipboard, setClipboard] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const operationLock = useRef(false);
+  const atTrashRoot = browser.currentParentId === preferences?.trashId;
+  const inTrash = atTrashRoot || browser.ancestors.some(item => item.id === preferences?.trashId);
+  useEffect(() => { if (connected) void getFilePreferences().then(setPreferences).catch(() => undefined); }, [connected]);
+  useEffect(() => { if (!preferences) return; return subscribeFileLocation(location => { setTab("shared"); browser.navigateTo(location === "downloads" ? preferences.downloadsId : preferences.trashId); }); }, [preferences, browser.navigateTo]);
+  const operation = async (action: "copy" | "move" | "trash" | "restore", ids: string[], parentId?: string) => {
+    if (operationLock.current || !connected || !ids.length) return;
+    operationLock.current = true; setBusy(true);
+    try { await operateFiles({ action, ids, parentId }); await browser.refresh(); toast(({ copy: "已复制", move: "已移动", trash: "已移到废纸篓", restore: "已放回原处" })[action]); }
+    catch (error) { toast("文件操作失败", error instanceof Error ? error.message : "请重试"); }
+    finally { operationLock.current = false; setBusy(false); }
+  };
   const locationsId = useId();
   const locationsRef = useRef<HTMLElement>(null);
   const locationsButtonRef = useRef<HTMLButtonElement>(null);
@@ -53,7 +76,7 @@ export function FilesApp() {
   const closeLocations = () => { setLocationsOpen(false); locationsButtonRef.current?.focus(); };
   const displayedItems = browser.items; // The server is authoritative for filtering and ordering.
   const isListing = tab === "shared" || tab === "recent";
-  const canCreate = isListing && !browser.recent && connected && browser.canWrite && browser.canCreateChild;
+  const canCreate = isListing && !inTrash && !browser.recent && connected && browser.canWrite && browser.canCreateChild;
   const canMutate = (resource: FileResource) => {
     const state = browser.getCurrent();
     const latest = state.items.find(item => item.id === resource.id);
@@ -85,10 +108,13 @@ export function FilesApp() {
       else void downloadResource(resource.id, resource.name).catch(error => toast(error instanceof Error ? error.message : `${resource.name} 下载失败`));
       return;
     }
+    if (command === "delete" && !inTrash) { if (canMutate(resource)) void operation("trash", browser.selectedIds.has(resource.id) ? [...browser.selectedIds] : [resource.id]); return; }
     if (canMutate(resource)) setModal({ type: command, resource });
   };
   const menuItems = (resource?: FileResource): ContextMenuItem[] => {
     if (!resource) return [
+      { id: "paste", label: "粘贴项目", icon: <ClipboardPaste size={14} />, disabled: !canCreate || !clipboard.length || busy, onClick: () => void operation("copy", clipboard, browser.currentParentId) },
+      { id: "paste-move", label: "将项目移到此处", icon: <Move size={14} />, disabled: !canCreate || !clipboard.length || busy, onClick: () => void operation("move", clipboard, browser.currentParentId) },
       { id: "new-folder", label: "新建文件夹", icon: <FolderPlus size={14} />, disabled: !canCreate, onClick: () => execute("new-folder") },
       { id: "upload", label: "上传文件", icon: <UploadCloud size={14} />, disabled: !canCreate, onClick: () => execute("upload") },
       { id: "refresh", label: "刷新", icon: <RefreshCw size={14} />, disabled: !connected, onClick: () => execute("refresh") },
@@ -102,9 +128,12 @@ export function FilesApp() {
     const writable = canMutate(resource);
     return [
       { id: "open", label: resource.type === "folder" ? "打开" : "下载", icon: resource.type === "folder" ? <Folder size={14} /> : <Download size={14} />, disabled: !connected || resource.canRead === false, onClick: () => execute("open", resource) },
+      { id: "preview", label: "快速查看", icon: <Eye size={14} />, onClick: () => setModal({ type: "preview", resource }) },
+      { id: "copy", label: "复制", icon: <Copy size={14} />, disabled: !connected, onClick: () => setClipboard(browser.selectedIds.has(resource.id) ? [...browser.selectedIds] : [resource.id]) },
+      ...(atTrashRoot ? [{ id: "restore", label: "放回原处", icon: <Undo2 size={14} />, disabled: !writable, onClick: () => void operation("restore", [resource.id]) }] : []),
       { id: "rename", label: "重命名", icon: <Pencil size={14} />, disabled: !writable, onClick: () => execute("rename", resource) },
-      { id: "move", label: "移动到...", icon: <Move size={14} />, disabled: !writable, onClick: () => execute("move", resource) },
-      { id: "delete", label: "删除", icon: <Trash2 size={14} />, disabled: !writable, onClick: () => execute("delete", resource) },
+      { id: "move", label: "移动到...", icon: <Move size={14} />, disabled: !writable, onClick: () => browser.selectedIds.has(resource.id) && browser.selectedIds.size > 1 ? setModal({ type: "batch-move", ids: [...browser.selectedIds] }) : execute("move", resource) },
+      { id: "delete", label: inTrash ? "永久删除" : "移到废纸篓", icon: <Trash2 size={14} />, disabled: !writable, onClick: () => execute("delete", resource) },
       { id: "info", label: "显示简介", icon: <Info size={14} />, onClick: () => execute("info", resource) },
     ];
   };
@@ -114,7 +143,7 @@ export function FilesApp() {
     event.stopPropagation();
     const target = event.currentTarget;
     target.focus();
-    if (resource) browser.select(resource.id);
+    if (resource && !browser.selectedIds.has(resource.id)) browser.select(resource.id);
     const rect = target.getBoundingClientRect();
     contextMenu.open(event.clientX || rect.left, event.clientY || rect.bottom, menuItems(resource), target);
   };
@@ -131,13 +160,28 @@ export function FilesApp() {
       return;
     }
     if (target.closest("button, select") || !isListing) return;
-    const command: Command | undefined = event.key === "F2" ? "rename" : event.key === "Delete" ? "delete" : event.key === "Enter" ? "open" : undefined;
+    const modifier = event.metaKey || event.ctrlKey;
+    const key = event.key.toLowerCase();
+    if (modifier && ["a", "c", "v"].includes(key)) {
+      event.preventDefault();
+      if (key === "a") browser.selectAll();
+      if (key === "c") setClipboard([...browser.selectedIds]);
+      if (key === "v" && canCreate) void operation(event.altKey ? "move" : "copy", clipboard, browser.currentParentId);
+      return;
+    }
+    if (modifier && event.shiftKey && key === "n") { event.preventDefault(); execute("new-folder"); return; }
+    if (modifier && event.key === "ArrowUp") { event.preventDefault(); browser.goUp(); return; }
+    if (modifier && event.key === "ArrowDown" && resource) { event.preventDefault(); execute("open", resource); return; }
+    if (modifier && event.key === "[") { event.preventDefault(); browser.goBack(); return; }
+    if (modifier && event.key === "]") { event.preventDefault(); browser.goForward(); return; }
+    if (event.key === " " && resource) { event.preventDefault(); setModal({ type: "preview", resource }); return; }
+    const command: Command | undefined = event.key === "F2" || event.key === "Enter" ? "rename" : event.key === "Delete" || modifier && event.key === "Backspace" ? "delete" : undefined;
     if (command && resource) { event.preventDefault(); event.stopPropagation(); execute(command, resource); }
     else if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       const nodes = [...rootRef.current!.querySelectorAll<HTMLElement>("[data-resource-id]")];
       const index = nodes.findIndex(node => node.dataset.resourceId === resource?.id);
       const next = event.key === "Home" ? 0 : event.key === "End" ? nodes.length - 1 : Math.max(0, Math.min(nodes.length - 1, index + (["ArrowUp", "ArrowLeft"].includes(event.key) ? -1 : 1)));
-      if (nodes[next]) { event.preventDefault(); nodes[next].focus(); browser.select(nodes[next].dataset.resourceId!); }
+      if (nodes[next]) { event.preventDefault(); nodes[next].focus(); browser.select(nodes[next].dataset.resourceId!, modifier, event.shiftKey); }
     } else if (event.key === "Escape") browser.clearSelection();
   };
 
@@ -194,15 +238,24 @@ export function FilesApp() {
     const selected = browser.selectedIds.has(resource.id);
     return <div key={resource.id} role={grid ? "gridcell" : "row"} aria-label={resource.name} data-resource-id={resource.id}
       aria-selected={selected} tabIndex={0}
-      className={`min-w-0 cursor-pointer outline-offset-[-2px] ${grid ? "relative flex flex-col items-center gap-1 rounded-lg p-2 pt-9" : "flex items-center gap-2 border-b px-3 py-2"} ${selected ? "bg-foreground/10" : "hover:bg-muted/50"}`}
-      onFocus={event => { if (event.target === event.currentTarget) browser.select(resource.id); }}
+      className={`finder-item min-w-0 cursor-default select-none outline-offset-[-2px] ${grid ? "relative flex flex-col items-center gap-1 rounded-lg p-2 pt-9" : "flex items-center gap-2 border-b px-3 py-2"} ${selected ? "finder-selected" : "hover:bg-muted/50"}`}
+      draggable={!busy && resource.meta?.systemLocation === undefined}
+      onDragStart={event => { const ids = selected ? [...browser.selectedIds] : [resource.id]; event.dataTransfer.setData("application/x-linkos-files", JSON.stringify(ids)); event.dataTransfer.effectAllowed = "copyMove"; }}
+      onDragOver={event => { if (resource.type === "folder" && resource.canCreateChild) { event.preventDefault(); event.currentTarget.classList.add("finder-drop-target"); } }}
+      onDragLeave={event => event.currentTarget.classList.remove("finder-drop-target")}
+      onDrop={event => {
+        event.currentTarget.classList.remove("finder-drop-target");
+        if (resource.type !== "folder" || !resource.canCreateChild) return;
+        const raw = event.dataTransfer.getData("application/x-linkos-files");
+        if (raw) { event.preventDefault(); event.stopPropagation(); setDragging(false); try { void operation(event.altKey ? "copy" : "move", JSON.parse(raw), resource.id); } catch { toast("无法读取拖拽项目"); } }
+      }}
       onClick={event => {
-        event.currentTarget.focus(); browser.select(resource.id);
+        event.currentTarget.focus(); browser.select(resource.id, event.metaKey || event.ctrlKey, event.shiftKey);
         if (resource.type === "folder" && window.matchMedia("(max-width: 767px)").matches) execute("open", resource);
       }}
       onDoubleClick={() => { if (!window.matchMedia("(max-width: 767px)").matches || resource.type !== "folder") execute("open", resource); }}
       onContextMenu={event => openMenu(event, resource)}>
-      <span className={`grid shrink-0 place-items-center rounded-lg bg-muted text-foreground/70 ${grid ? "h-12 w-12" : "h-8 w-8"}`}><Icon size={grid ? 22 : 15} /></span>
+      <span className={`finder-file-icon ${resource.type === "folder" ? "finder-folder" : ""} grid shrink-0 place-items-center ${grid ? "h-14 w-14" : "h-8 w-8"}`}><Icon size={grid ? 42 : 23} strokeWidth={1.4} /></span>
       <span role={grid ? undefined : "gridcell"} title={resource.name} className={`min-w-0 ${grid ? "line-clamp-2 w-full break-all text-center text-xs" : "flex-1 truncate text-sm"}`}>{resource.name}</span>
       {!grid && <>
         <span role="gridcell" className="hidden w-24 shrink-0 text-xs text-muted-foreground md:block">{formatRelativeTime(resource.updatedAt)}</span>
@@ -224,7 +277,7 @@ export function FilesApp() {
       <p className="text-sm">{browser.searchQuery ? "无搜索结果" : browser.recent ? "暂无最近文件" : "此文件夹为空"}</p>
       <p className="text-xs text-muted-foreground">{browser.searchQuery ? "尝试不同的搜索词" : canCreate ? "拖入文件或点击上传" : "当前列表只读"}</p>
     </div>}
-    {!!displayedItems.length && <div role="grid" aria-label="文件列表" className={browser.viewMode === "grid" ? "grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2 p-3" : ""}>
+    {!!displayedItems.length && <div role="grid" aria-label="文件列表" aria-multiselectable="true" className={browser.viewMode === "grid" ? "grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2 p-3" : ""}>
       {browser.viewMode === "list" && <div role="row" className="flex items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
         <span className="w-8 shrink-0" />
         <span role="columnheader" aria-sort={browser.sortField === "name" ? browser.sortOrder === "asc" ? "ascending" : "descending" : "none"} className="min-w-0 flex-1"><button className="w-full text-left" onClick={() => browser.setSort("name")}>名称 {browser.sortField === "name" ? browser.sortOrder === "asc" ? "↑" : "↓" : ""}</button></span>
@@ -237,7 +290,7 @@ export function FilesApp() {
     {browser.nextCursor && <div className="flex justify-center py-3"><button className="rounded-md border px-3 py-1.5 text-xs disabled:opacity-40" disabled={browser.loading || !connected} onClick={() => void browser.loadMore()}>加载更多</button></div>}
   </>;
 
-  return <div ref={rootRef} className="flex h-full min-w-0 flex-col overflow-hidden" onKeyDown={handleKey}>
+  return <div ref={rootRef} className="finder-app flex h-full min-w-0 flex-col overflow-hidden" onKeyDown={handleKey} aria-busy={busy}>
     {!connected && <div className="border-b border-warning/40 bg-warning/10 px-3 py-2 text-xs" role="alert">网关离线，文件列表保持只读；连接恢复后可继续上传。</div>}
     {browser.notice && <p role="status" className="border-b px-3 py-2 text-xs">{browser.notice}</p>}
     <div className="flex min-w-0 flex-wrap items-center gap-1 border-b p-2">
@@ -264,17 +317,31 @@ export function FilesApp() {
     </div>
     <div className="relative flex min-h-0 min-w-0 flex-1">
       {locationsOpen && <button className="absolute inset-0 z-10 border-none bg-black/20 md:hidden" aria-label="关闭文件位置" onClick={closeLocations} />}
-      <nav ref={locationsRef} id={locationsId} aria-label="文件位置" className={`${locationsOpen ? "flex" : "hidden"} absolute inset-y-0 left-0 z-20 w-44 shrink-0 flex-col gap-1 overflow-y-auto border-r bg-background p-1 py-2 shadow-lg md:static md:flex md:w-32 md:shadow-none`}>
-        {tabs.map(item => <button key={item.key} className={`rounded px-2 py-2 text-left text-xs ${tab === item.key ? "bg-foreground/10 font-medium" : "text-muted-foreground hover:bg-muted"}`} aria-pressed={tab === item.key} onClick={() => switchTab(item.key)}>{item.label}</button>)}
+      <nav ref={locationsRef} id={locationsId} aria-label="文件位置" className={`finder-sidebar ${locationsOpen ? "flex" : "hidden"} absolute inset-y-0 left-0 z-20 w-44 shrink-0 flex-col gap-1 overflow-y-auto border-r bg-background p-2 py-3 shadow-lg md:static md:flex md:w-40 md:shadow-none`}>
+        <p className="px-2 py-1 text-[10px] font-semibold text-muted-foreground">个人收藏</p>
+        {preferences && [
+          { id: preferences.inboxId, label: "个人文件", Icon: HardDrive },
+          { id: preferences.downloadsId, label: "Downloads", Icon: Download },
+          { id: preferences.outgoingId, label: "聊天附件", Icon: Folder },
+        ].map(({ id, label, Icon }) => <button key={id} className={`finder-location ${browser.currentParentId === id && tab === "shared" ? "is-active" : ""}`} aria-pressed={browser.currentParentId === id && tab === "shared"} onClick={() => { navigate(id); if (locationsOpen) closeLocations(); }}><Icon size={16} />{label}</button>)}
+        <p className="mt-3 px-2 py-1 text-[10px] font-semibold text-muted-foreground">工作区</p>
+        {tabs.map((item, index) => { const Icon = [Folder, Clock, HardDrive, UploadCloud][index]; return <button key={item.key} className={`finder-location ${tab === item.key && (item.key !== "shared" || !browser.currentParentId) ? "is-active" : ""}`} aria-pressed={tab === item.key && (item.key !== "shared" || !browser.currentParentId)} onClick={() => { switchTab(item.key); if (item.key === "shared") navigate(""); }}><Icon size={16} />{item.label}</button>; })}
+        {preferences && <button className={`finder-location mt-auto ${inTrash ? "is-active" : ""}`} onClick={() => { navigate(preferences.trashId); if (locationsOpen) closeLocations(); }}><Trash2 size={16} />废纸篓</button>}
       </nav>
-      <div className="min-h-0 min-w-0 flex-1 overflow-auto" tabIndex={0} aria-label="文件内容" onContextMenu={event => openMenu(event)}
+      <div className={`finder-content min-h-0 min-w-0 flex-1 overflow-auto ${dragging ? "finder-drop-target" : ""}`} tabIndex={0} aria-label="文件内容" onContextMenu={event => openMenu(event)}
         onClick={event => {
           const target = event.target as HTMLElement;
           if (target.closest("[data-resource-id], button, input, select, textarea, a, [role=button]") || isEditableElement(target)) return;
           browser.clearSelection();
           event.currentTarget.focus();
         }}
-        onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); if (canCreate) void startUploads(Array.from(event.dataTransfer.files)); }}>
+        onDragOver={event => { event.preventDefault(); if (canCreate) setDragging(true); }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={event => {
+          event.preventDefault(); setDragging(false); if (!canCreate) return;
+          const raw = event.dataTransfer.getData("application/x-linkos-files");
+          if (raw) { try { void operation(event.altKey ? "copy" : "move", JSON.parse(raw), browser.currentParentId); } catch { toast("无法读取拖拽项目"); } }
+          else void startUploads(Array.from(event.dataTransfer.files));
+        }}>
+        {inTrash && <div className="flex items-center justify-between border-b bg-muted/40 p-3 text-xs"><span>项目会保留在废纸篓，直到永久删除。</span>{atTrashRoot && <button className="rounded border px-2 py-1 disabled:opacity-40" disabled={!browser.selectedIds.size || busy} onClick={() => void operation("restore", [...browser.selectedIds])}>放回原处</button>}</div>}
         {isListing && renderListing()}
         {tab === "local" && <div>
           <p className="p-3 text-xs text-muted-foreground">本机历史，仅此浏览器保存的上传记录；文件可能已移动或删除。</p>
@@ -300,7 +367,7 @@ export function FilesApp() {
         <button className="max-w-48 truncate rounded px-1 py-0.5 hover:bg-muted" title={part.name} aria-current={index === path.length - 1 ? "location" : undefined} onClick={() => navigate(part.id)}>{part.name}</button>
       </span>)}
     </nav>
-    <div className="flex justify-between gap-2 border-t px-3 py-1.5 text-xs text-muted-foreground"><span>{isListing ? `${displayedItems.length} / ${browser.total} 个项目` : tab === "local" ? `${records.length} 个本机历史` : `${transfers.length} 个传输任务`}</span><span>{connected ? "已连接" : "离线"}</span></div>
+    <div className="flex justify-between gap-2 border-t px-3 py-1.5 text-xs text-muted-foreground"><span>{isListing ? `${displayedItems.length} / ${browser.total} 个项目${browser.selectedIds.size ? ` · 已选择 ${browser.selectedIds.size} 项` : ""}` : tab === "local" ? `${records.length} 个本机历史` : `${transfers.length} 个传输任务`}</span><span>{busy ? "正在处理…" : connected ? "已连接" : "离线"}</span></div>
     <input ref={inputRef} className="sr-only" type="file" multiple aria-label="选择要上传的文件" onChange={event => { if (event.target.files) void startUploads(Array.from(event.target.files)); event.currentTarget.value = ""; }} />
     {modal.type === "createFolder" && <NameForm title="新建文件夹" submitLabel="创建" disabled={!canCreate} onCancel={closeModal} onSubmit={name => {
       if (!canCreate || !browser.isOnline()) throw new Error("离线或无写入权限");
@@ -316,5 +383,7 @@ export function FilesApp() {
       assertWritable(modal.resource); return mutate(() => moveResource(modal.resource.id, target), `已移动「${modal.resource.name}」`);
     }} />}
     {modal.type === "info" && <InfoPanel resource={{ ...modal.resource, path: modal.path, pathError: modal.pathError }} onClose={closeModal} />}
+    {modal.type === "preview" && <QuickLook resource={modal.resource} onClose={closeModal} />}
+    {modal.type === "batch-move" && <FolderPicker title="移动所选项目" excludedIds={modal.ids} onClose={closeModal} onChoose={async parentId => { await operateFiles({ action: "move", ids: modal.ids, parentId }); await browser.refresh(); toast("已移动所选项目"); }} />}
   </div>;
 }

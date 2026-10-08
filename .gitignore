@@ -13,6 +13,9 @@ dist/
 coverage/
 tmp/
 .tmp/
+.local/
+services/gateway/bundle/
+release/
 .gocache-*/
 test-results/
 apps/web/test-results/

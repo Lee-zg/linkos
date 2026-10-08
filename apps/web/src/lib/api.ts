@@ -315,11 +315,43 @@ export function listChannels() {
   return request<{ items: ChatChannel[]; nextCursor?: string }>("/api/v1/channels");
 }
 
+export function listChatMembers() { return request<{ items: Array<{ userId: string; displayName: string }> }>("/api/v1/chat-members"); }
+
+export function getFilePreferences() {
+  return request<import("@linkos/protocol").FilePreferences>("/api/v1/file-preferences");
+}
+
+export function setReceiveFolder(receiveFolderId: string) {
+  return request<import("@linkos/protocol").FilePreferences>("/api/v1/file-preferences", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ receiveFolderId }) });
+}
+
+export function operateFiles(input: import("@linkos/protocol").FileOperationInput) {
+  return request<{ items: FileResource[] }>("/api/v1/file-operations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+}
+
+export function receiveAttachments(messageId: string) {
+  return request<{ items: FileResource[] }>(`/api/v1/chat-receipts/${encodeURIComponent(messageId)}`, { method: "POST" });
+}
+
+export async function previewFile(resourceId: string, signal: AbortSignal): Promise<Blob> {
+  const response = await fetch(apiURL(`/api/v1/files/${encodeURIComponent(resourceId)}/content`), { headers: { Authorization: `Bearer ${getSessionToken()}` }, signal });
+  if (!response.ok) throw new Error(`预览失败 (${response.status})`);
+  const limit = 5 * 1024 * 1024;
+  if (Number(response.headers.get("content-length")) > limit) { await response.body?.cancel(); throw new Error("大于 5 MB 的文件请下载查看"); }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("无法读取文件内容");
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let size = 0;
+  try { for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > limit) throw new Error("大于 5 MB 的文件请下载查看"); chunks.push(new Uint8Array(value)); } }
+  finally { await reader.cancel(); }
+  return new Blob(chunks, { type: response.headers.get("content-type") ?? "application/octet-stream" });
+}
+
 export function createChannel(input: { name: string; kind?: "channel" | "direct"; memberIds?: string[] }) {
   return request<ChatChannel>("/api/v1/channels", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
 }
 
-export function listMessages(input: { channelId?: string; q?: string; cursor?: string; limit?: number } = {}) {
+export function listMessages(input: { channelId?: string; q?: string; cursor?: string; limit?: number; newest?: boolean } = {}) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(input)) if (value !== undefined && value !== "") params.set(key, String(value));
   return request<{ items: ChatMessage[]; nextCursor?: string }>(`/api/v1/messages?${params}`);
@@ -409,7 +441,7 @@ export function listResources(input: { scope?: string; parentId?: string; recent
 }
 
 export function getResource(id: string) {
-  return request<ResourceRecord>(`/api/v1/resources/${encodeURIComponent(id)}`);
+  return request<FileResource>(`/api/v1/resources/${encodeURIComponent(id)}`);
 }
 
 export function createFolder(input: { name: string; parentId?: string; meta?: Record<string, unknown>; acl?: unknown }) {
@@ -442,7 +474,7 @@ export function createResourceShare(id: string, ttlSeconds?: number) {
   return request<ResourceShareLink>(`/api/v1/resources/${encodeURIComponent(id)}/share`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ttlSeconds }) });
 }
 
-export function setPluginStatus(id: string, action: "install" | "enable" | "disable" | "rollback" | "uninstall") {
+export function setPluginStatus(id: string, action: "enable" | "disable" | "rollback") {
   return request<PluginRecord>(`/api/v1/plugins/${encodeURIComponent(id)}/${action}`, { method: "POST" });
 }
 

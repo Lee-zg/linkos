@@ -291,6 +291,13 @@ export function AccessGate({
                 >
                   登录进入
                 </button>
+                <details className="text-xs text-muted-foreground">
+                  <summary className="cursor-pointer py-1">连接其他工作区</summary>
+                  <div className="mt-2 flex gap-2">
+                    <input aria-label="Gateway 地址" className="min-w-0 flex-1 rounded-lg border bg-background px-2 py-2" value={gatewayAddress} onChange={event => setGatewayAddress(event.target.value)} />
+                    <button className="rounded-lg border px-3" disabled={busy} onClick={() => { try { setGatewayBase(gatewayAddress); dropSession(); void showGate(); } catch (err) { setError(err instanceof Error ? err.message : "地址无效"); } }}>连接</button>
+                  </div>
+                </details>
               </div>
 
               {policy.allowFullAnonymous && (

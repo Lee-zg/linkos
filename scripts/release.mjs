@@ -1,0 +1,196 @@
+import { spawn, execFileSync } from "node:child_process";
+import {
+  cp,
+  mkdir,
+  readdir,
+  writeFile,
+  rm,
+  chmod,
+  stat,
+} from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { createGzip } from "node:zlib";
+import { pipeline } from "node:stream/promises";
+import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { stagePlugins } from "./stage-plugins.mjs";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+function option(name, fallback) {
+  const i = process.argv.indexOf("--" + name);
+  return i < 0 ? fallback : process.argv[i + 1];
+}
+const version = option("version", process.env.LINKOS_VERSION ?? "0.1.0-dev");
+if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(version))
+  throw new Error("Invalid release version");
+const targets = option("target", "windows/amd64,linux/amd64,linux/arm64").split(
+  ",",
+);
+let commit = "unknown";
+try {
+  commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+} catch {}
+const release = path.join(root, "release"),
+  bundle = path.join(root, "services/gateway/bundle");
+async function run(command, args, options = {}) {
+  await new Promise((resolve, reject) => {
+    const c = spawn(command, args, {
+      cwd: root,
+      stdio: "inherit",
+      windowsHide: true,
+      ...options,
+    });
+    c.on("error", reject);
+    c.on("exit", (code) =>
+      code === 0 ? resolve() : reject(new Error(`${command} exited ${code}`)),
+    );
+  });
+}
+async function digest(file) {
+  const hash = createHash("sha256");
+  for await (const block of createReadStream(file)) hash.update(block);
+  return hash.digest("hex");
+}
+async function tarGzip(directory, output) {
+  const names = await readdir(directory);
+  async function* blocks() {
+    for (const name of names) {
+      const file = path.join(directory, name),
+        size = (await stat(file)).size;
+      const header = Buffer.alloc(512);
+      header.write(name, 0, 100, "utf8");
+      const octal = (offset, length, value) =>
+        header.write(
+          value.toString(8).padStart(length - 1, "0") + "\0",
+          offset,
+          length,
+          "ascii",
+        );
+      octal(100, 8, name === "linkos" || name.endsWith(".sh") ? 0o755 : 0o644);
+      octal(108, 8, 0);
+      octal(116, 8, 0);
+      octal(124, 12, size);
+      octal(136, 12, 0);
+      header.fill(32, 148, 156);
+      header[156] = 48;
+      header.write("ustar\0", 257, 6, "ascii");
+      header.write("00", 263, 2, "ascii");
+      const sum = header.reduce((s, b) => s + b, 0);
+      header.write(sum.toString(8).padStart(6, "0") + "\0 ", 148, 8, "ascii");
+      yield header;
+      for await (const block of createReadStream(file)) yield block;
+      if (size % 512) yield Buffer.alloc(512 - (size % 512));
+    }
+    yield Buffer.alloc(1024);
+  }
+  await pipeline(
+    Readable.from(blocks()),
+    createGzip(),
+    createWriteStream(output),
+  );
+}
+await mkdir(release, { recursive: true });
+if (!process.argv.includes("--skip-web"))
+  await run(
+    process.execPath,
+    [path.join(root, "apps/web/node_modules/vite/bin/vite.js"), "build"],
+    { cwd: path.join(root, "apps/web") },
+  );
+// Staging lives entirely in a generated, ignored directory.
+await rm(bundle, { recursive: true, force: true });
+await mkdir(bundle, { recursive: true });
+await cp(path.join(root, "apps/web/dist"), path.join(bundle, "web"), {
+  recursive: true,
+});
+await stagePlugins(
+  path.join(root, "plugins"),
+  path.join(bundle, "plugins"),
+  version,
+);
+const outputs = [];
+for (const target of targets) {
+  if (!["windows/amd64", "linux/amd64", "linux/arm64"].includes(target))
+    throw new Error(`Unsupported target: ${target}`);
+  const [os, arch] = target.split("/");
+  const name = `linkos-${version}-${os}-${arch}`,
+    dir = path.join(release, name);
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(dir, { recursive: true });
+  const binary = path.join(dir, os === "windows" ? "linkos.exe" : "linkos");
+  await run(
+    process.env.LINKOS_GO ?? "go",
+    [
+      "build",
+      "-tags",
+      "release",
+      "-trimpath",
+      "-ldflags",
+      `-s -w -X main.buildVersion=${version} -X main.buildCommit=${commit}`,
+      "-o",
+      binary,
+      "./services/gateway",
+    ],
+    { env: { ...process.env, GOOS: os, GOARCH: arch, CGO_ENABLED: "0" } },
+  );
+  await chmod(binary, 0o755);
+  await writeFile(
+    path.join(dir, "VERSION.json"),
+    JSON.stringify(
+      { version, commit, target, binarySHA256: await digest(binary) },
+      null,
+      2,
+    ) + "\n",
+  );
+  if (os === "windows")
+    await writeFile(
+      path.join(dir, "start.cmd"),
+      '@echo off\r\n"%~dp0linkos.exe" serve %*\r\nif errorlevel 1 pause\r\n',
+    );
+  else
+    await writeFile(
+      path.join(dir, "start.sh"),
+      '#!/bin/sh\nset -eu\ndir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$dir/linkos" serve "$@"\n',
+      { mode: 0o755 },
+    );
+  const output = path.join(
+    release,
+    name + (os === "windows" ? ".zip" : ".tar.gz"),
+  );
+  if (os === "windows") {
+    if (process.platform === "win32")
+      await run("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Compress-Archive -LiteralPath '${binary.replaceAll("'", "''")}','${path.join(dir, "start.cmd").replaceAll("'", "''")}','${path.join(dir, "VERSION.json").replaceAll("'", "''")}' -DestinationPath '${output.replaceAll("'", "''")}' -Force`,
+      ]);
+    else
+      await run("zip", [
+        "-j",
+        "-q",
+        output,
+        binary,
+        path.join(dir, "start.cmd"),
+        path.join(dir, "VERSION.json"),
+      ]);
+  } else await tarGzip(dir, output);
+  outputs.push({
+    file: path.basename(output),
+    sha256: await digest(output),
+    target,
+  });
+}
+await writeFile(
+  path.join(release, "SHA256SUMS"),
+  outputs.map((o) => `${o.sha256}  ${o.file}`).join("\n") + "\n",
+);
+await writeFile(
+  path.join(release, "manifest.json"),
+  JSON.stringify({ version, commit, packages: outputs }, null, 2) + "\n",
+);
+console.log(`Release packages: ${release}`);

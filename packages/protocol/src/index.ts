@@ -236,8 +236,23 @@ export interface MessageCreateInput {
 }
 
 export interface MessageBlock {
-  type: "text" | "file.reference" | "code.reference" | "run.result";
+  type: "text" | "file.reference" | "code.reference" | "code.snippet" | "run.result";
   value: Record<string, unknown>;
+}
+
+/** Paths refer to the recipient's LinkOS workspace, not the host OS. */
+export interface FilePreferences {
+  downloadsId: string;
+  inboxId: string;
+  trashId: string;
+  outgoingId: string;
+  receiveFolderId: string;
+}
+
+export interface FileOperationInput {
+  action: "copy" | "move" | "trash" | "restore";
+  ids: string[];
+  parentId?: string;
 }
 
 export interface ChatChannel {

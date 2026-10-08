@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -241,6 +243,7 @@ func TestMVPPluginRollbackRestoresPreviousManifest(t *testing.T) {
 	server, auth := newMVPTestServer(t)
 	defer server.Close()
 	token := mvpAdminToken(t, auth)
+	previousVersion := mvpPluginVersion(t, server, token, "chat.core")
 	manifest := protocol.PluginManifest{ID: "chat.core", Name: "Chat Next", Version: "2.0.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/v2.js"}, Permissions: []string{"chat.read"}}
 	raw, _ := json.Marshal(map[string]interface{}{"manifest": manifest})
 	install := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/install", bytes.NewReader(raw))
@@ -254,7 +257,7 @@ func TestMVPPluginRollbackRestoresPreviousManifest(t *testing.T) {
 	rollback.Header.Set("Authorization", "Bearer "+token)
 	rollbackRec := httptest.NewRecorder()
 	server.Config.Handler.ServeHTTP(rollbackRec, rollback)
-	if rollbackRec.Code != http.StatusOK || !bytes.Contains(rollbackRec.Body.Bytes(), []byte(`"version":"0.1.0"`)) {
+	if rollbackRec.Code != http.StatusOK || !bytes.Contains(rollbackRec.Body.Bytes(), []byte(`"version":"`+previousVersion+`"`)) {
 		t.Fatalf("rollback status=%d body=%s", rollbackRec.Code, rollbackRec.Body.String())
 	}
 }
@@ -263,6 +266,7 @@ func TestMVPPluginHealthFailureAutomaticallyRollsBack(t *testing.T) {
 	server, auth := newMVPTestServer(t)
 	defer server.Close()
 	token := mvpAdminToken(t, auth)
+	previousVersion := mvpPluginVersion(t, server, token, "chat.core")
 	manifest := protocol.PluginManifest{ID: "chat.core", Name: "Chat Broken", Version: "2.0.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/v2.js"}, Permissions: []string{"chat.read"}}
 	raw, _ := json.Marshal(map[string]interface{}{"manifest": manifest})
 	install := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/install", bytes.NewReader(raw))
@@ -276,8 +280,114 @@ func TestMVPPluginHealthFailureAutomaticallyRollsBack(t *testing.T) {
 	fail.Header.Set("Authorization", "Bearer "+token)
 	failRec := httptest.NewRecorder()
 	server.Config.Handler.ServeHTTP(failRec, fail)
-	if failRec.Code != http.StatusOK || !bytes.Contains(failRec.Body.Bytes(), []byte(`"version":"0.1.0"`)) || !bytes.Contains(failRec.Body.Bytes(), []byte(`"health":"degraded"`)) {
+	if failRec.Code != http.StatusOK || !bytes.Contains(failRec.Body.Bytes(), []byte(`"version":"`+previousVersion+`"`)) || !bytes.Contains(failRec.Body.Bytes(), []byte(`"health":"degraded"`)) {
 		t.Fatalf("health failure did not roll back: status=%d body=%s", failRec.Code, failRec.Body.String())
+	}
+}
+
+func mvpPluginVersion(t *testing.T, server *httptest.Server, token, id string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Config.Handler.ServeHTTP(rec, req)
+	var result struct {
+		Items []protocol.PluginRecord `json:"items"`
+	}
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &result) != nil {
+		t.Fatal("cannot capture previous plugin version")
+	}
+	for _, item := range result.Items {
+		if item.ID == id {
+			return item.Version
+		}
+	}
+	t.Fatal("plugin not found")
+	return ""
+}
+
+func TestMVPPluginRollbackResetsHealth(t *testing.T) {
+	store := newMVPStore(memoryBackend{}, newHub())
+	original := protocol.PluginManifest{ID: "chat.core", Name: "Chat", Version: "0.1.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/chat.js"}, Permissions: []string{"chat.read"}}
+	store.state.Plugins["chat.core"] = protocol.PluginRecord{
+		ID: "chat.core", Name: "Chat", Version: "2.0.0", Status: "installed",
+		Health: "degraded", Manifest: original,
+		Previous: &protocol.PluginPrevious{Manifest: original, Status: "enabled"},
+	}
+
+	result, ok := store.setPluginStatus("chat.core", "rollback")
+	if !ok {
+		t.Fatal("setPluginStatus returned false")
+	}
+	if result.Version != "0.1.0" {
+		t.Fatalf("expected version 0.1.0, got %s", result.Version)
+	}
+	if result.Health != "healthy" {
+		t.Fatalf("expected health healthy after rollback, got %s", result.Health)
+	}
+}
+
+func TestPluginContentServesFile(t *testing.T) {
+	pluginDir := t.TempDir()
+	chatDir := filepath.Join(pluginDir, "chat")
+	uiDir := filepath.Join(chatDir, "ui")
+	if err := os.MkdirAll(uiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := protocol.PluginManifest{ID: "chat.core", Name: "Chat", Version: "0.1.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/index.html"}, Permissions: []string{"chat.read"}}
+	manifestRaw, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(chatDir, "manifest.json"), manifestRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	htmlContent := "<!DOCTYPE html><html><body>Chat Plugin</body></html>"
+	if err := os.WriteFile(filepath.Join(uiDir, "index.html"), []byte(htmlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LINKOS_PLUGIN_DIR", pluginDir)
+	server, auth := newMVPTestServer(t)
+	defer server.Close()
+	token := mvpAdminToken(t, auth)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins/chat.core/content/ui/index.html", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Config.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("content status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("Chat Plugin")) {
+		t.Fatalf("content body=%s", rec.Body.String())
+	}
+}
+
+func TestPluginContentBlocksTraversal(t *testing.T) {
+	pluginDir := t.TempDir()
+	chatDir := filepath.Join(pluginDir, "chat")
+	uiDir := filepath.Join(chatDir, "ui")
+	if err := os.MkdirAll(uiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := protocol.PluginManifest{ID: "chat.core", Name: "Chat", Version: "0.1.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/index.html"}, Permissions: []string{"chat.read"}}
+	manifestRaw, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(chatDir, "manifest.json"), manifestRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "index.html"), []byte("safe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LINKOS_PLUGIN_DIR", pluginDir)
+	server, auth := newMVPTestServer(t)
+	defer server.Close()
+	token := mvpAdminToken(t, auth)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins/chat.core/content/../../../etc/passwd", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	server.Config.Handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK && bytes.Contains(rec.Body.Bytes(), []byte("root:")) {
+		t.Fatal("path traversal succeeded — security vulnerability")
 	}
 }
 
@@ -359,6 +469,50 @@ func TestMVPRunnerRegistrationCredentialLifecycle(t *testing.T) {
 	deleteResponse := request(http.MethodDelete, "/api/v1/runners/runner-lifecycle", nil, adminToken)
 	if deleteResponse.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+}
+
+func TestPluginHealthCheckerDetectsMissingUI(t *testing.T) {
+	tmpDir := t.TempDir()
+	chatDir := filepath.Join(tmpDir, "chat")
+	if err := os.MkdirAll(filepath.Join(chatDir, "ui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chatDir, "manifest.json"), []byte(`{"id":"chat.core"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LINKOS_PLUGIN_DIR", tmpDir)
+
+	store := newMVPStore(memoryBackend{}, newHub())
+	store.state.Plugins["chat.core"] = protocol.PluginRecord{
+		ID:     "chat.core",
+		Name:   "Chat",
+		Status: "enabled",
+		Health: "healthy",
+		Manifest: protocol.PluginManifest{
+			ID:    "chat.core",
+			Name:  "Chat",
+			Entry: map[string]string{"ui": "ui/index.html"},
+		},
+	}
+
+	store.checkPluginHealth()
+	store.mu.RLock()
+	rec := store.state.Plugins["chat.core"]
+	store.mu.RUnlock()
+	if rec.Health != "degraded" {
+		t.Fatalf("expected degraded when UI file missing, got %s", rec.Health)
+	}
+
+	if err := os.WriteFile(filepath.Join(chatDir, "ui", "index.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store.checkPluginHealth()
+	store.mu.RLock()
+	rec = store.state.Plugins["chat.core"]
+	store.mu.RUnlock()
+	if rec.Health != "healthy" {
+		t.Fatalf("expected healthy after UI file restored, got %s", rec.Health)
 	}
 }
 

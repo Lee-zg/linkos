@@ -16,3 +16,23 @@ func TestArtifactCollectionIsBoundedAndPathSafe(t *testing.T) {
 		t.Fatalf("unexpected artifacts: %+v", items)
 	}
 }
+
+func TestProductionAPITokenIsSeparateFromRegistration(t *testing.T) {
+	t.Setenv("LINKOS_ENV", "production")
+	t.Setenv("LINKOS_RUNNER_REGISTRATION_TOKEN", "bootstrap-only")
+	t.Setenv("LINKOS_RUNNER_API_TOKEN", "")
+	if runnerAPIToken() != "" {
+		t.Fatal("registration token granted job API access")
+	}
+	t.Setenv("LINKOS_RUNNER_API_TOKEN", "api-only")
+	if runnerAPIToken() != "api-only" {
+		t.Fatal("API token ignored")
+	}
+}
+func TestRemoteEngineIsRefused(t *testing.T) {
+	t.Setenv("LINKOS_ENV", "production")
+	t.Setenv("DOCKER_HOST", "tcp://remote:2376")
+	if _, e := newRunnerService().engine(); e == nil {
+		t.Fatal("remote engine accepted")
+	}
+}

@@ -179,6 +179,9 @@ type fileAncestor struct {
 
 // File permissions are scoped to the current single workspace, even for admins.
 func fileResourceAllows(principal authPrincipal, item protocol.ResourceRecord, action string) bool {
+	if owner, _ := item.Meta["personalOwner"].(string); owner != "" && owner != principal.UserID {
+		return false
+	}
 	if principal.WorkspaceID != "demo" || item.WorkspaceID != "demo" || !roleAllows(principal.Role, action) {
 		return false
 	}
@@ -232,6 +235,9 @@ func (s *mvpStore) itemView(principal authPrincipal, item protocol.ResourceRecor
 	_, read := s.fileAncestors(principal, item)
 	write := read && fileResourceAllows(principal, item, "resource.write")
 	canCreateChild := write && item.Type == "folder"
+	if item.Meta["systemLocation"] != nil {
+		write = false
+	}
 	// Renaming, moving or deleting an entry also mutates its source directory.
 	// Creating a child only requires write on the current directory, not its parent.
 	if write && item.ParentID != "" {
@@ -354,6 +360,10 @@ func (s *mvpStore) handleFilesList(w http.ResponseWriter, r *http.Request, princ
 		}
 		view := s.itemView(principal, parent)
 		canRead, canWrite, canCreateChild = view.CanRead, view.CanWrite, view.CanCreateChild
+		// Personal system entries cannot be renamed, but their contents are writable.
+		if parent.Meta["systemLocation"] != nil {
+			canWrite = view.CanCreateChild
+		}
 	}
 	if !canRead {
 		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", "resource.read permission required")
@@ -670,6 +680,9 @@ func (s *mvpStore) handleFilesPatch(w http.ResponseWriter, r *http.Request, id s
 	item.Name = newName
 	item.ParentID = newParentID
 	if input.Meta != nil {
+		for _, key := range []string{"personalOwner", "systemLocation", "originalParentId", "trashedAt"} {
+			delete(input.Meta, key)
+		}
 		if item.Type == "file" {
 			for _, key := range []string{"contentHash", "size", "mimeType", "uploadId"} {
 				delete(input.Meta, key)
