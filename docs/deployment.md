@@ -15,6 +15,22 @@ pnpm run dev:status
 
 `setup:dev` 按锁文件安装依赖、下载 Go 模块、构建 Gateway、初始化 `.local/linkos/linkos.json`。`dev` 不安装依赖：先检查项目身份与实例锁，复用服务，协调 Web 5173 / Gateway 8787 附近的空闲端口。实际地址以输出和 `.local/linkos/dev.json` 为准；Vite 使用 strictPort 和实际 Gateway 代理地址。
 
+端口可由命令行或环境变量指定，优先级为命令行 → 环境变量 → 默认值。`--port` 是 `--web-port` 的别名，同时支持 `--web-port=5180` 写法：
+
+```sh
+pnpm dev --web-port 5180 --gateway-port 8790
+```
+
+PowerShell 环境变量写法：
+
+```powershell
+$env:LINKOS_WEB_PORT = "5180"
+$env:LINKOS_GATEWAY_PORT = "8790"
+pnpm dev
+```
+
+端口必须为 1–65535；被占用或被另一服务预留时，向后查找最多 100 个端口并输出实际选择，不终止占用进程。Gateway 的公开 URL、允许来源和 Vite 的 HTTP/WebSocket 代理随实际端口同步。已运行的同项目服务优先复用，再次执行不会为更换端口重启旧实例；端口参数在下次正常启动时生效。独立验收使用相同参数，默认端口仍为 15173 / 18887。
+
 前端由 Vite HMR 更新。后端仅重启本次启动器创建的持久化实例，先编译候选程序，失败保留旧服务。Ctrl+C 只停止本次创建的服务。旧 Gateway 的健康接口缺少项目标识时，会尝试核实监听进程的仓库路径；无法核实的占用不终止。复用旧内存实例会提示存储状态，其数据不会被自动转换、清空或重启。
 
 独立验收使用 `pnpm run setup:acceptance`、`pnpm run dev:acceptance`，数据在 `.local/acceptance`，优先使用 15173 / 18887。自动化测试可通过 `LINKOS_DEV_HOME` 指定独立目录，使用独立项目实例标识。

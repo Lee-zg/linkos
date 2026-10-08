@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { fork, spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtemp, mkdir, writeFile, readFile, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -33,12 +34,29 @@ await writeFile(
     projectId: id,
   }),
 );
-const env = { ...process.env, LINKOS_DEV_HOME: home };
+const blockers = [];
+async function occupyPort() {
+  const server = createServer((_request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ service: "unrelated" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  blockers.push(server);
+  return server.address().port;
+}
+const blockedWebPort = await occupyPort(),
+  blockedGatewayPort = await occupyPort();
+const env = {
+  ...process.env,
+  LINKOS_DEV_HOME: home,
+  LINKOS_WEB_PORT: "1", // The CLI preference must override this environment value.
+  LINKOS_GATEWAY_PORT: String(blockedGatewayPort),
+};
 let output = "";
 function launcher() {
   const child = fork(
     path.join(root, "scripts/dev.mjs"),
-    ["dev", "--acceptance"],
+    ["dev", "--acceptance", "--web-port", String(blockedWebPort)],
     { cwd: root, env, silent: true },
   );
   for (const stream of [child.stdout, child.stderr])
@@ -65,6 +83,29 @@ try {
   }, "launcher did not start");
   const before = await readJSON(path.join(home, "run.json")),
     registry = await readJSON(path.join(home, "dev.json"));
+  assert.notEqual(Number(new URL(registry.webURL).port), blockedWebPort);
+  assert.notEqual(Number(new URL(registry.webURL).port), 1);
+  assert.notEqual(
+    Number(new URL(registry.gatewayURL).port),
+    blockedGatewayPort,
+  );
+  assert.ok(
+    output.includes(`Web: preferred port ${blockedWebPort} is occupied`),
+  );
+  assert.ok(
+    output.includes(
+      `Gateway: preferred port ${blockedGatewayPort} is occupied`,
+    ),
+  );
+  assert.equal(
+    (await probe(registry.webURL + "/api/v1/healthz")).projectId,
+    id,
+  );
+  for (const port of [blockedWebPort, blockedGatewayPort])
+    assert.equal(
+      (await probe(`http://127.0.0.1:${port}/`)).service,
+      "unrelated",
+    );
   const duplicate = launcher();
   const code = await new Promise((resolve) => duplicate.once("exit", resolve));
   assert.equal(code, 0);
@@ -93,6 +134,7 @@ try {
     return (
       state &&
       state.pid !== before.pid &&
+      output.includes("Gateway reloaded; persistent data restored.") &&
       (await probe(registry.gatewayURL + "/api/v1/readyz"))
     );
   }, "Go change did not reload");
@@ -136,10 +178,13 @@ try {
   try {
     await waitReady(registry.gatewayURL + "/api/v1/readyz", standalone);
     adopter = launcher();
-    await until(
-      () => probe(registry.webURL + "/__linkos/dev"),
-      "adopter Web did not start",
-    );
+    await until(async () => {
+      const state = await readJSON(path.join(home, "dev.json"));
+      return (
+        state?.launcherPID === adopter.pid &&
+        (await probe(registry.webURL + "/__linkos/dev"))
+      );
+    }, "adopter Web did not start");
     assert.equal(
       (await readJSON(path.join(home, "run.json"))).pid,
       standalone.pid,
@@ -164,12 +209,16 @@ try {
     }
   }
   console.log(
-    "PASS: unified launch, coordinated ports, duplicate prevention, compilation failure preservation, successful Go reload, graceful owned shutdown and adopted-service preservation",
+    "PASS: unified launch, custom CLI/environment ports, occupied-port fallback, synchronized proxy, duplicate prevention, compilation failure preservation, successful Go reload, graceful owned shutdown and adopted-service preservation",
   );
 } finally {
   if (sentinel) await unlink(sentinel);
   if (child.exitCode === null && child.connected) {
     child.send({ type: "linkos.stop" });
     await new Promise((resolve) => child.once("exit", resolve));
+  }
+  for (const server of blockers) {
+    assert.equal(server.listening, true);
+    await new Promise((resolve) => server.close(resolve));
   }
 }

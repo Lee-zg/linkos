@@ -23,6 +23,49 @@ export function checkNodeVersion(
       `Node.js 24 or newer (stable) required; detected ${version} at ${executable}. Recommended: Node.js 24 LTS.`,
     );
 }
+function parsePort(value, label) {
+  const port = Number(value);
+  if (
+    !/^\d+$/.test(String(value)) ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  )
+    throw new Error(
+      `${label} must be an integer from 1 to 65535; received ${JSON.stringify(value)}`,
+    );
+  return port;
+}
+export function developmentPorts(args = [], environment = process.env) {
+  let web = environment.LINKOS_WEB_PORT,
+    gateway = environment.LINKOS_GATEWAY_PORT;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === "--" || argument === "--acceptance") continue;
+    const separator = argument.indexOf("="),
+      option = separator < 0 ? argument : argument.slice(0, separator);
+    if (!["--port", "--web-port", "--gateway-port"].includes(option))
+      throw new Error(
+        `Unknown option: ${argument}. Use --web-port and --gateway-port.`,
+      );
+    const value = separator < 0 ? args[++index] : argument.slice(separator + 1);
+    if (value === undefined || value.startsWith("--"))
+      throw new Error(`${option} requires a port from 1 to 65535`);
+    if (option === "--gateway-port") gateway = value;
+    else web = value;
+  }
+  const acceptance = args.includes("--acceptance");
+  return {
+    webPort: parsePort(
+      web ?? (acceptance ? 15173 : 5173),
+      "Web port (--web-port / LINKOS_WEB_PORT)",
+    ),
+    gatewayPort: parsePort(
+      gateway ?? (acceptance ? 18887 : 8787),
+      "Gateway port (--gateway-port / LINKOS_GATEWAY_PORT)",
+    ),
+  };
+}
 export async function projectID(root) {
   const value = await realpath(root);
   return createHash("sha256")
@@ -116,7 +159,9 @@ export async function writeJSON(file, value) {
   await writeFile(file, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
 }
 export async function freePort(preferred, excluded = []) {
-  for (let port = preferred; port < preferred + 100; port++) {
+  preferred = parsePort(preferred, "Preferred port");
+  const last = Math.min(preferred + 99, 65535);
+  for (let port = preferred; port <= last; port++) {
     if (excluded.includes(port)) continue;
     const free = await new Promise((resolve) => {
       const s = createServer();
@@ -125,7 +170,9 @@ export async function freePort(preferred, excluded = []) {
     });
     if (free) return port;
   }
-  throw new Error(`No free port near ${preferred}`);
+  throw new Error(
+    `No free port in ${preferred}–${last}; choose another preferred port with --web-port or --gateway-port`,
+  );
 }
 export async function launcherLock(dir, id) {
   await mkdir(path.dirname(dir), { recursive: true });

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   checkNodeVersion,
+  developmentPorts,
   belongsToProject,
   freePort,
   launcherLock,
@@ -119,9 +120,10 @@ async function setup() {
   console.log(`Prepared ${home}; run pnpm dev`);
 }
 async function status() {
+  const preferred = developmentPorts(process.argv.slice(3));
   const saved = (await readJSON(registry)) ?? {
-    webURL: "http://127.0.0.1:5173",
-    gatewayURL: "http://127.0.0.1:8787",
+    webURL: `http://127.0.0.1:${preferred.webPort}`,
+    gatewayURL: `http://127.0.0.1:${preferred.gatewayPort}`,
   };
   const web = await probe(saved.webURL + "/__linkos/dev"),
     gateway = await probe(saved.gatewayURL + "/api/v1/healthz");
@@ -142,12 +144,15 @@ async function status() {
 }
 async function development() {
   checkTools();
+  const preferred = developmentPorts(process.argv.slice(3));
   if (!existsSync(vite) || !existsSync(configFile))
     throw new Error("Run pnpm run setup:dev first");
   const releaseLock = await launcherLock(path.join(home, "dev.lock"), id);
   if (!releaseLock) {
     await status();
-    console.log("Workspace launcher already active; no duplicate started.");
+    console.log(
+      "Workspace launcher already active; reusing its existing ports. No duplicate started.",
+    );
     return;
   }
   const children = new Set(),
@@ -229,10 +234,19 @@ async function development() {
   try {
     const saved = await readJSON(registry);
     let gatewayURL, webURL, gatewayPort;
+    async function choosePort(preferredPort, service, excluded = []) {
+      const port = await freePort(preferredPort, excluded);
+      if (port !== preferredPort)
+        console.log(
+          `${service}: preferred port ${preferredPort} is occupied or reserved; using ${port}.`,
+        );
+      return port;
+    }
     for (const url of [
       ...new Set(
         [
           saved?.gatewayURL,
+          `http://127.0.0.1:${preferred.gatewayPort}`,
           ...(acceptance || process.env.LINKOS_DEV_HOME
             ? []
             : ["http://127.0.0.1:8787"]),
@@ -255,11 +269,19 @@ async function development() {
       }
     }
     if (!gatewayURL) {
-      gatewayPort = await freePort(acceptance ? 18887 : 8787);
+      gatewayPort = await choosePort(preferred.gatewayPort, "Gateway");
       gatewayURL = `http://127.0.0.1:${gatewayPort}`;
     }
     for (const url of [
-      ...new Set([saved?.webURL, "http://127.0.0.1:5173"].filter(Boolean)),
+      ...new Set(
+        [
+          saved?.webURL,
+          `http://127.0.0.1:${preferred.webPort}`,
+          ...(acceptance || process.env.LINKOS_DEV_HOME
+            ? []
+            : ["http://127.0.0.1:5173"]),
+        ].filter(Boolean),
+      ),
     ]) {
       const h = await probe(url + "/__linkos/dev");
       if (belongsToProject(h, id, "web") && h.gatewayURL === gatewayURL) {
@@ -270,7 +292,9 @@ async function development() {
     }
     const webPort = webURL
       ? Number(new URL(webURL).port)
-      : await freePort(acceptance ? 15173 : 5173, [gatewayPort]);
+      : await choosePort(preferred.webPort, "Web", [
+          Number(new URL(gatewayURL).port),
+        ]);
     const reuseWeb = !!webURL;
     webURL ??= `http://127.0.0.1:${webPort}`;
     const gatewayArgs = [

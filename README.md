@@ -29,6 +29,8 @@ pnpm run dev:status
 
 启动器管理 Gateway 与 Vite，保留 HMR；先检查已有项目服务并复用，端口冲突时协调空闲端口。访问地址以终端输出为准。数据库、文件和日志保存在 `.local/linkos`，后端编译失败时保留旧实例。
 
+需要自定义端口时执行 `pnpm dev --web-port 5180 --gateway-port 8790`（`--port` 也可指定 Web 端口），或设置 `LINKOS_WEB_PORT` / `LINKOS_GATEWAY_PORT` 环境变量。指定端口被占用时自动尝试后续空闲端口，代理使用实际 Gateway 地址；已有项目服务优先复用。
+
 生产 Compose、TLS、Runner engine、备份恢复和回滚流程见 [`docs/deployment.md`](docs/deployment.md)。
 
 ### 便携部署
