@@ -1,19 +1,20 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { Download, LogOut, Minimize2, Pin, Trash2, X } from "lucide-react";
-import { getApp, visibleApps } from "./apps";
+import { useAppRegistry } from "./app-registry";
 import { AppIcon } from "./AppIcon";
 import { useWindowManager } from "./window-manager";
 import { useSession } from "../lib/session";
 import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { requestFileLocation } from "../lib/file-intent";
 import { getGatewayBase } from "../lib/api";
-import type { AppId } from "./types";
+import type { DynamicAppId } from "./types";
+import { apps as defaultApps } from "./apps";
 
 export function Dock({ connected }: { connected: boolean }) {
   const { windows, open, focus, close, minimize } = useWindowManager();
   const { profile, exit } = useSession();
   const { open: openMenu } = useContextMenu();
-  const apps = visibleApps(profile.role);
+  const { apps, commands, getApp } = useAppRegistry();
   const key = `linkos.dock:${JSON.stringify([getGatewayBase(), profile.workspaceId, profile.userId])}`;
   const [order, setOrder] = useState<string[]>(() => {
     try {
@@ -27,8 +28,15 @@ export function Dock({ connected }: { connected: boolean }) {
     } catch {
       /* defaults */
     }
-    return apps.map((app) => app.id);
+    return defaultApps.map((app) => app.id);
   });
+  const knownApps = useRef(new Set(defaultApps.map((app) => app.id as string)));
+  useEffect(() => {
+    const added = apps.filter((app) => !knownApps.current.has(app.id));
+    added.forEach((app) => knownApps.current.add(app.id));
+    if (added.length)
+      setOrder((current) => [...current, ...added.map((app) => app.id)]);
+  }, [apps]);
   const [launching, setLaunching] = useState<string | null>(null);
   const surface = useRef<HTMLDivElement>(null);
   const frame = useRef(0);
@@ -105,9 +113,16 @@ export function Dock({ connected }: { connected: boolean }) {
         !order.includes(app.id) && windows.some((win) => win.appId === app.id),
     ),
   ];
-  const menu = (id: AppId): ContextMenuItem[] => {
+  const menu = (id: DynamicAppId): ContextMenuItem[] => {
     const win = windows.find((item) => item.appId === id);
     return [
+      ...commands
+        .filter((command) => command.id.startsWith(`${id}:`))
+        .map((command) => ({
+          id: command.id,
+          label: command.title,
+          onClick: command.run,
+        })),
       {
         id: "open",
         label: win ? "显示窗口" : "打开",
@@ -148,6 +163,7 @@ export function Dock({ connected }: { connected: boolean }) {
     ];
   };
   const location = (target: "downloads" | "trash") => {
+    if (!apps.some((app) => app.id === "files")) return;
     requestFileLocation(target);
     open("files");
   };
@@ -270,7 +286,7 @@ export function Dock({ connected }: { connected: boolean }) {
         })}
         <span className="dock-divider" />
         {windows
-          .filter((win) => win.minimized)
+          .filter((win) => win.minimized && getApp(win.appId))
           .map((win) => (
             <button
               key={win.id}
@@ -281,7 +297,7 @@ export function Dock({ connected }: { connected: boolean }) {
               <span className="dock-visual">
                 <span className="dock-mini-window">
                   <span />
-                  <AppIcon app={getApp(win.appId)} size={24} />
+                  <AppIcon app={getApp(win.appId)!} size={24} />
                 </span>
                 <span className="dock-tooltip">{win.title}</span>
               </span>

@@ -10,6 +10,7 @@ import { WorkspaceProvider, useWorkspace } from "./lib/workspace";
 import { SessionContext } from "./lib/session";
 import { dropSession } from "./lib/api";
 import { AccessGate } from "./gate/AccessGate";
+import { AppRegistryProvider } from "./os/app-registry";
 
 function Shell() {
   const { connected } = useWorkspace();
@@ -39,11 +40,13 @@ function Workbench({
   return (
     <SessionContext.Provider value={{ profile, exit: onExit }}>
       <WorkspaceProvider>
-        <WindowManagerProvider>
-          <ContextMenuProvider>
-            <Shell />
-          </ContextMenuProvider>
-        </WindowManagerProvider>
+        <AppRegistryProvider>
+          <WindowManagerProvider>
+            <ContextMenuProvider>
+              <Shell />
+            </ContextMenuProvider>
+          </WindowManagerProvider>
+        </AppRegistryProvider>
       </WorkspaceProvider>
     </SessionContext.Provider>
   );

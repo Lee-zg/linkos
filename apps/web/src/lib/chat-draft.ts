@@ -4,6 +4,8 @@ export interface ChatDraft {
   body: string;
   blocks: MessageBlock[];
   clientMsgId?: string;
+  code?: string;
+  language?: string;
 }
 
 export function readChatDraft(raw: string | null): ChatDraft {
@@ -26,6 +28,12 @@ export function readChatDraft(raw: string | null): ChatDraft {
     return {
       body: typeof value.body === "string" ? value.body.slice(0, 65536) : "",
       blocks,
+      ...(typeof value.code === "string"
+        ? { code: value.code.slice(0, 65536) }
+        : {}),
+      ...(typeof value.language === "string"
+        ? { language: value.language.slice(0, 40) }
+        : {}),
       clientMsgId:
         typeof value.clientMsgId === "string" ? value.clientMsgId : undefined,
     };

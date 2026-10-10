@@ -90,6 +90,7 @@ type mvpStore struct {
 	state           mvpState
 	resourceRev     int64
 	loadErr         error
+	pluginRuntime   *pluginRuntime
 }
 
 func (s *mvpStore) recordMutation(r *http.Request, principal authPrincipal, action, target, detail string) {
@@ -101,6 +102,7 @@ func (s *mvpStore) recordMutation(r *http.Request, principal authPrincipal, acti
 
 func newMVPStore(backend persistBackend, h *hub) *mvpStore {
 	s := &mvpStore{backend: backend, hub: h, state: newMVPState()}
+	s.pluginRuntime = newPluginRuntime()
 	if durable, ok := backend.(mvpBlobBackend); ok {
 		raw, err := durable.loadMVPState()
 		if err != nil {
@@ -119,7 +121,18 @@ func newMVPStore(backend persistBackend, h *hub) *mvpStore {
 		}
 	}
 	normalizeMVPState(&s.state)
+	if repo, ok := backend.(pluginStateBackend); ok {
+		records, found, err := repo.loadPluginState()
+		if err != nil {
+			s.loadErr = err
+			return s
+		}
+		if found {
+			s.state.Plugins = records
+		}
+	}
 	s.ensureSeedData()
+	s.normalizePlugins()
 	s.rebuildMessageIndex()
 	return s
 }
@@ -356,11 +369,12 @@ func (s *mvpStore) ensureSeedData() {
 		now := time.Now().UTC().Format(time.RFC3339)
 		s.state.Runners["runner-dev"] = protocol.RunnerInfo{ID: "runner-dev", WorkspaceID: "demo", Platform: "container", Version: "0.1.0", Capabilities: []string{"go/1.23", "node/22"}, Labels: map[string]string{"pool": "default"}, Status: "offline", LastSeenAt: now}
 	}
-	if len(s.state.Plugins) == 0 {
-		for _, p := range []struct{ id, name string }{{"files.core", "文件"}, {"chat.core", "聊天"}, {"code.workbench", "代码工作台"}, {"runner.exec", "运行任务"}} {
-			manifest := protocol.PluginManifest{ID: p.id, Name: p.name, Version: "0.1.0", APIVersion: "1.0", Entry: mapEntry(p.id), Permissions: []string{"resource.read"}, Contributes: mapContributes(p.id), Network: map[string]interface{}{"mode": "deny"}}
-			s.state.Plugins[p.id] = protocol.PluginRecord{ID: p.id, Name: p.name, Version: "0.1.0", APIVersion: "1.0", Status: "enabled", Manifest: manifest, Permissions: manifest.Permissions, Health: "healthy", InstalledAt: time.Now().UTC().Format(time.RFC3339)}
+	for _, p := range []struct{ id, name string }{{"files.core", "文件"}, {"chat.core", "聊天"}, {"code.workbench", "代码工作台"}, {"runner.exec", "运行任务"}} {
+		if _, exists := s.state.Plugins[p.id]; exists {
+			continue
 		}
+		manifest := protocol.PluginManifest{ID: p.id, Name: p.name, Version: "0.1.0", APIVersion: "1.0", Entry: mapEntry(p.id), Permissions: []string{"resource.read"}, Contributes: mapContributes(p.id), Network: map[string]interface{}{"mode": "deny"}}
+		s.state.Plugins[p.id] = protocol.PluginRecord{ID: p.id, Name: p.name, Version: "0.1.0", APIVersion: "1.0", Status: "enabled", Manifest: manifest, Permissions: manifest.Permissions, Health: "healthy", InstalledAt: time.Now().UTC().Format(time.RFC3339)}
 	}
 	s.loadPluginManifestsLocked()
 	s.persistLocked()
@@ -435,7 +449,7 @@ func validatePluginManifest(manifest protocol.PluginManifest) []string {
 }
 
 func isPluginID(id string) bool {
-	if id == "" {
+	if id == "" || len(id) > 128 || strings.HasSuffix(id, ".") {
 		return false
 	}
 	for i, r := range id {
@@ -489,6 +503,9 @@ func (s *mvpStore) loadPluginManifestsLocked() {
 			continue
 		}
 		if current, exists := s.state.Plugins[manifest.ID]; exists {
+			if current.Source == "package" || current.Source == "legacy" {
+				continue
+			}
 			current.Manifest, current.Name, current.Version, current.APIVersion, current.Signature = manifest, manifest.Name, manifest.Version, manifest.APIVersion, signature
 			current.Permissions, current.Health = manifest.Permissions, "healthy"
 			s.state.Plugins[manifest.ID] = current
@@ -522,7 +539,11 @@ func (s *mvpStore) persistLocked() {
 	if !ok {
 		return
 	}
-	raw, err := json.Marshal(s.state)
+	state := s.state
+	if _, ok := s.backend.(pluginStateBackend); ok {
+		state.Plugins = nil
+	}
+	raw, err := json.Marshal(state)
 	if err != nil {
 		log.Printf("marshal mvp state: %v", err)
 		return
@@ -822,53 +843,23 @@ func (s *mvpStore) listPlugins() []protocol.PluginRecord {
 }
 
 func (s *mvpStore) setPluginStatus(id string, status protocol.PluginStatus) (protocol.PluginRecord, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item, ok := s.state.Plugins[id]
-	if !ok {
-		return protocol.PluginRecord{}, false
+	s.mu.RLock()
+	rec, exists := s.state.Plugins[id]
+	s.mu.RUnlock()
+	if !exists {
+		return rec, false
 	}
-	if status == "disabled" || status == "enabled" || status == "installed" {
-		item.Status = string(status)
-		item.Health = "healthy"
-	} else if status == "uninstalled" {
-		item.Status = string(status)
-		item.Health = "failed"
-	} else if status == "failed" {
-		if item.Previous != nil {
-			previous := item.Previous
-			item.Manifest = previous.Manifest
-			item.Signature = previous.Signature
-			item.Name = previous.Manifest.Name
-			item.Version = previous.Manifest.Version
-			item.APIVersion = previous.Manifest.APIVersion
-			item.Permissions = previous.Manifest.Permissions
-			item.Status = previous.Status
-			item.Health = "degraded"
-			item.Previous = nil
-		} else {
-			item.Status = string(status)
-			item.Health = "failed"
-		}
+	action := string(status)
+	switch action {
+	case "enabled":
+		action = "enable"
+	case "disabled":
+		action = "disable"
+	case "uninstalled":
+		action = "uninstall"
 	}
-	if status == "rollback" && item.Previous != nil {
-		previous := item.Previous
-		item.Manifest = previous.Manifest
-		item.Signature = previous.Signature
-		item.Name = previous.Manifest.Name
-		item.Version = previous.Manifest.Version
-		item.APIVersion = previous.Manifest.APIVersion
-		item.Permissions = previous.Manifest.Permissions
-		item.Status = previous.Status
-		item.Health = "healthy"
-		item.Previous = nil
-	} else if status == "rollback" {
-		item.Status = "disabled"
-		item.Health = "healthy"
-	}
-	s.state.Plugins[id] = item
-	s.persistLocked()
-	return item, true
+	result, err := s.transitionPlugin(id, action, normalizePlugin(rec).Revision)
+	return result, err == nil
 }
 
 func (s *mvpStore) listRunners() []protocol.RunnerInfo {
@@ -913,15 +904,10 @@ func registerMVPRoutes(mux *http.ServeMux, auth *authStore, store *mvpStore) {
 	mux.HandleFunc("/api/v1/runners/register", store.handleRunnerRegister)
 	mux.HandleFunc("/api/v1/runners/heartbeat", store.handleRunnerHeartbeat)
 	mux.HandleFunc("/api/v1/runners/", active(store.handleRunnerItem))
-	mux.HandleFunc("/api/v1/plugins", active(store.handlePlugins))
-	mux.HandleFunc("/api/v1/plugins/", func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/"), "/content/", 2)
-		if len(parts) == 2 && !strings.Contains(parts[0], "/") {
-			store.handlePluginContent(w, r, parts[0], parts[1])
-			return
-		}
-		active(store.handlePluginItem)(w, r)
-	})
+	mux.HandleFunc("/api/v1/plugins", active(store.managedPlugins))
+	mux.HandleFunc("/api/v1/plugins/", active(store.managedPluginItem))
+	mux.HandleFunc("/api/v1/plugin-packages/inspect", active(store.handlePluginPackageInspect))
+	mux.HandleFunc("/api/v1/plugin-views/", store.handlePluginView)
 	mux.HandleFunc("/api/v1/metrics", active(store.handleMetrics))
 }
 
@@ -1771,126 +1757,6 @@ func (s *mvpStore) handleRunnerItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-func (s *mvpStore) handlePlugins(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
-		return
-	}
-	writeJSON(w, 200, map[string]interface{}{"items": s.listPlugins(), "nextCursor": ""})
-}
-func (s *mvpStore) handlePluginItem(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/"), "/"), "/")
-	id := parts[0]
-	if id == "" {
-		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "plugin not found")
-		return
-	}
-	if len(parts) > 1 && parts[1] == "content" {
-		s.handlePluginContent(w, r, id, strings.Join(parts[2:], "/"))
-		return
-	}
-	status := ""
-	if len(parts) > 1 {
-		status = parts[1]
-	}
-	var target protocol.PluginStatus
-	switch status {
-	case "enable":
-		target = "enabled"
-	case "disable":
-		target = "disabled"
-	case "install":
-		target = "installed"
-	case "rollback":
-		target = "rollback"
-	case "uninstall":
-		target = "uninstalled"
-	case "health-failed":
-		target = "failed"
-	default:
-		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "unknown plugin action")
-		return
-	}
-	if r.Method != "POST" {
-		writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
-		return
-	}
-	principal, _ := principalForRequest(s.authFromHub(), r)
-	permission := "plugin.manage"
-	if status == "install" {
-		permission = "plugin.install"
-	}
-	if !roleAllows(principal.Role, permission) {
-		writeAPIError(w, http.StatusForbidden, "FORBIDDEN", permission+" permission required")
-		return
-	}
-	if status == "install" {
-		var input struct {
-			Manifest  protocol.PluginManifest `json:"manifest"`
-			Signature string                  `json:"signature"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 128*1024)).Decode(&input); err != nil || len(validatePluginManifest(input.Manifest)) > 0 {
-			writeAPIError(w, http.StatusBadRequest, "PLUGIN_INCOMPATIBLE", "invalid plugin manifest")
-			return
-		}
-		if input.Manifest.ID != id {
-			writeAPIError(w, http.StatusBadRequest, "PLUGIN_INCOMPATIBLE", "manifest id does not match route")
-			return
-		}
-		keys := pluginTrustedKeys()
-		if (pluginSignaturesRequired() && len(keys) == 0) || !verifyPluginSignature(input.Manifest, input.Signature, keys) {
-			writeAPIError(w, http.StatusBadRequest, "PLUGIN_INCOMPATIBLE", "plugin signature is not trusted")
-			return
-		}
-		s.mu.Lock()
-		var previous *protocol.PluginPrevious
-		if current, exists := s.state.Plugins[id]; exists {
-			previous = &protocol.PluginPrevious{Manifest: current.Manifest, Signature: current.Signature, Status: current.Status}
-		}
-		s.state.Plugins[id] = protocol.PluginRecord{ID: input.Manifest.ID, Name: input.Manifest.Name, Version: input.Manifest.Version, APIVersion: input.Manifest.APIVersion, Status: "installed", Manifest: input.Manifest, Signature: input.Signature, Permissions: input.Manifest.Permissions, Health: "healthy", InstalledAt: time.Now().UTC().Format(time.RFC3339), Previous: previous}
-		s.persistLocked()
-		item := s.state.Plugins[id]
-		s.mu.Unlock()
-		s.hub.emit("plugin.updated", item)
-		s.recordMutation(r, principal, "plugin.install", id, input.Manifest.Version)
-		writeJSON(w, http.StatusCreated, item)
-		return
-	}
-	item, ok := s.setPluginStatus(id, target)
-	if !ok {
-		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "plugin not found")
-		return
-	}
-	s.hub.emit("plugin.updated", item)
-	s.recordMutation(r, principal, "plugin."+status, id, item.Version)
-	writeJSON(w, 200, item)
-}
-
-func (s *mvpStore) handlePluginContent(w http.ResponseWriter, r *http.Request, pluginID string, filePath string) {
-	if r.Method != http.MethodGet {
-		writeAPIError(w, 405, "INVALID_REQUEST", "method not allowed")
-		return
-	}
-	s.mu.RLock()
-	pluginRecord, exists := s.state.Plugins[pluginID]
-	s.mu.RUnlock()
-	if !exists {
-		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "plugin not found")
-		return
-	}
-	if !validPluginAssetPath(filePath) {
-		writeAPIError(w, 400, "INVALID_REQUEST", "invalid plugin path")
-		return
-	}
-	data, err := readPluginAsset(pluginID, filePath, pluginRecord.Signature)
-	if err != nil {
-		writeAPIError(w, 404, "PLUGIN_INCOMPATIBLE", "file not found")
-		return
-	}
-	w.Header().Set("Content-Type", guessContentType(filePath))
-	w.Write(data)
-}
-
 func pluginDirName(id string) string {
 	if idx := strings.Index(id, "."); idx > 0 {
 		return id[:idx]
@@ -1917,32 +1783,7 @@ func guessContentType(path string) string {
 	}
 }
 
-func (s *mvpStore) checkPluginHealth() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, rec := range s.state.Plugins {
-		if rec.Status != "enabled" {
-			continue
-		}
-		uiEntry := rec.Manifest.Entry["ui"]
-		if uiEntry == "" {
-			continue
-		}
-		_, err := readPluginAsset(id, uiEntry, rec.Signature)
-		healthy := err == nil
-		if healthy && rec.Health == "degraded" {
-			rec.Health = "healthy"
-			s.state.Plugins[id] = rec
-			s.persistLocked()
-			s.hub.emit("plugin.updated", rec)
-		} else if !healthy && rec.Health != "degraded" {
-			rec.Health = "degraded"
-			s.state.Plugins[id] = rec
-			s.persistLocked()
-			s.hub.emit("plugin.updated", rec)
-		}
-	}
-}
+func (s *mvpStore) checkPluginHealth() { s.checkManagedPluginHealth() }
 
 func (s *mvpStore) startPluginHealthChecker(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)

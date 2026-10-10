@@ -1,0 +1,15 @@
+{
+  "id": "example.resource-viewer",
+  "name": "资源阅读器",
+  "version": "1.0.0",
+  "apiVersion": "1.0",
+  "entry": { "ui": "ui/index.html" },
+  "permissions": [
+    "resource.read:code.*",
+    "ui.notify",
+    "ui.command",
+    "event.subscribe:resources.changed"
+  ],
+  "contributes": { "commands": ["refresh"] },
+  "network": { "mode": "deny" }
+}

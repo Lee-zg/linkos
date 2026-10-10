@@ -41,11 +41,13 @@ func (s *mvpStore) loadBuiltinPluginsLocked() {
 		}
 		current, exists := s.state.Plugins[manifest.ID]
 		// Installed signed overrides retain their own lifecycle and version.
-		if exists && current.Signature != "" {
+		if exists && !builtinPlugin(current.ID) {
 			continue
 		}
 		current.ID, current.Name, current.Version, current.APIVersion = manifest.ID, manifest.Name, manifest.Version, manifest.APIVersion
 		current.Manifest, current.Permissions, current.Health = manifest, manifest.Permissions, "healthy"
+		current.Source = "builtin"
+		current.Runtime = "native"
 		if !exists {
 			current.Status = "enabled"
 		}

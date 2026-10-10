@@ -142,7 +142,7 @@ func backupWorkspace(home, configFile string, c runtimeConfig, output string) er
 		})
 	}
 	if e = addTree(c.DataDir, "data", func(file string) bool {
-		return file == c.UploadDir || (c.PluginDir != "" && file == c.PluginDir) || file == filepath.Join(c.DataDir, "backups") || strings.HasPrefix(filepath.Base(file), "gateway.db") || file == output
+		return file == c.UploadDir || (c.PluginDir != "" && c.PluginDir != filepath.Join(c.DataDir, "plugins") && file == c.PluginDir) || file == filepath.Join(c.DataDir, "backups") || strings.HasPrefix(filepath.Base(file), "gateway.db") || file == output
 
 	}); e != nil {
 		return e
@@ -402,12 +402,12 @@ func restoreWorkspace(home, configFile string, target runtimeConfig, archive str
 	}
 	// External plugins are restored within data so one directory swap installs
 	// all application state. Network and TLS settings stay local to the target.
+	target.PluginTrustedKeys = saved.PluginTrustedKeys
 	if _, e = os.Stat(filepath.Join(stage, "plugins")); e == nil {
-		target.PluginDir = filepath.Join(target.DataDir, "plugins")
-		if e = os.Rename(filepath.Join(stage, "plugins"), filepath.Join(stage, "data", "plugins")); e != nil {
+		target.PluginDir = filepath.Join(target.DataDir, "plugin-source")
+		if e = os.Rename(filepath.Join(stage, "plugins"), filepath.Join(stage, "data", "plugin-source")); e != nil {
 			return e
 		}
-		target.PluginTrustedKeys = saved.PluginTrustedKeys
 	}
 	if e = target.validate(); e != nil {
 		return e

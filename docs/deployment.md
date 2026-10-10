@@ -84,7 +84,7 @@ linkos stop --home /srv/linkos
 | runnerURL / runnerAPIToken | LINKOS_RUNNER_URL / LINKOS_RUNNER_API_TOKEN | 可选 Runner endpoint 与执行 API 凭据 |
 | discoveryPort | LINKOS_DISCOVERY_PORT / --discovery-port | UDP 发现端口 |
 
-生产内嵌官方插件无需自行签名，版本跟随程序；已安装的签名覆盖和生命周期状态保留。外部插件仍验证签名。manifest 的 UI 入口是实际存在的 `ui/index.html`，沙箱初始化与 ready 回应使用同一个请求 ID。
+生产内嵌官方插件无需自行签名，使用原生应用窗口，版本跟随程序，只提供启停；生命周期状态保留。外部插件必须上传完整 `.linkos-plugin` 包并验证受信签名，首期仅支持 API 1.0、包内 HTML UI 和 deny 网络。外部应用经资源票据和版本/nonce/协议握手进入沙箱；制作与安装步骤见 [插件开发手册](plugin-development.md)。旧 manifest-only 记录标为待修复，启动扫描不覆盖已提交安装。
 
 `/api/v1/healthz` 提供版本、提交和实例 ID；开发项目标识只给回环请求。`/api/v1/readyz` 检查数据库、文件存储和资源，Runner 关闭不影响就绪。上传路由的读取期限为 15 分钟，其他请求保留 30 秒期限；单分片上限仍为 64 MiB。
 
@@ -141,9 +141,9 @@ linkos restore /backup/workspace.tar.gz --home /srv/linkos-restored
 linkos serve --home /srv/linkos-restored
 ```
 
-归档含 SQLite 一致性快照、CAS 字节、未完成上传分片、有效配置、TLS 材料和可配置的外部插件。包含口令与私钥，按私有数据保存。恢复先核验每项 SHA-256、SQLite integrity_check、格式和数据库版本；拒绝重复条目、路径穿越、符号链接及缺失文件。已有数据库需显式 `--replace`；原数据保留在 `.before-restore-*`，安装失败会还原。
+归档含 SQLite 一致性快照（包括 plugin_registry）、CAS 字节、未完成上传分片、有效配置与插件受信公钥、TLS 材料、外部插件当前/上一版本的不可变资源以及配置的旧插件源目录。包含口令与私钥，按私有数据保存。恢复先核验每项 SHA-256、SQLite integrity_check、格式和数据库版本；拒绝重复条目、路径穿越、符号链接及缺失文件。已有数据库需显式 `--replace`；原数据保留在 `.before-restore-*`，安装失败会还原。
 
-跨目录/机器恢复将上传路径重定位到目标 data/uploads；身份、权限、聊天和文件内容随数据库恢复。网络、监听、域名及证书沿用目标初始化配置，恢复原管理员口令及其说明文件。源 TLS 材料在归档中保留，需要延续源 CA 时可在停止状态下显式取回；更换机器域名/IP 应使用目标证书。
+跨目录/机器恢复将上传路径重定位到目标 data/uploads；身份、权限、聊天和文件内容随数据库恢复。包资源按目标 data/plugins 解析，旧配置插件源恢复到 data/plugin-source，避免覆盖包版本目录；受信公钥恢复后可继续验签和升级。网络、监听、域名及证书沿用目标初始化配置，恢复原管理员口令及其说明文件。源 TLS 材料在归档中保留，需要延续源 CA 时可在停止状态下显式取回；更换机器域名/IP 应使用目标证书。
 
 容器备份：`docker compose stop gateway`，再 `docker compose run --rm --no-deps gateway backup --home /var/lib/linkos`，导出卷内生成的归档后再启动。恢复同样在核心停止时执行；不要使用 `down -v` 删除数据。
 
@@ -162,6 +162,7 @@ pnpm test:launcher
 node scripts/smoke-dev.mjs
 pnpm release
 node scripts/smoke-release.mjs /absolute/path/to/linkos
+pnpm test:plugins
 ```
 
-CI 覆盖 Windows/Linux 统一启动、重复启动、编译失败、Go 热重启、发布资源和 HTTPS/WS/大分片/慢速上传/Range/恢复冒烟，并在 Linux 跑 Compose 集成。本机无 Docker 时，不能将配置检查或交叉编译称为容器或 Linux 实机验收。
+CI 覆盖 Windows/Linux 统一启动、重复启动、编译失败、Go 热重启、发布资源和 HTTPS/WS/大分片/慢速上传/Range/恢复冒烟，并在 Linux 跑 Compose 集成。插件验收覆盖桌面/移动端开发代理以及便携 HTTPS/受信签名发布；设置 LINKOS_PLUGIN_SMOKE_BINARY 指向发布程序即可独立执行。本机无 Docker 时，不能将配置检查或交叉编译称为容器或 Linux 实机验收。

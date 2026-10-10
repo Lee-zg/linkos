@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>资源阅读器</title>
+  <style>
+    body {
+      font-family: system-ui;
+      color: #22332f;
+      background: #f4f7f5;
+      margin: 0;
+      padding: 28px;
+    }
+    h1 {
+      font-size: 24px;
+    }
+    p {
+      color: #60736a;
+    }
+    button {
+      padding: 8px 14px;
+      border: 1px solid #cedbd4;
+      border-radius: 8px;
+      background: white;
+    }
+    li {
+      padding: 12px;
+      border-bottom: 1px solid #cedbd4;
+    }
+    code {
+      font-size: 12px;
+    }
+    #status {
+      font-size: 13px;
+    }
+  </style>
+  <h1>工作区资源</h1>
+  <p id="user">正在连接宿主…</p>
+  <button id="refresh">刷新资源</button>
+  <ul id="resources"></ul>
+  <p id="status" role="status"></p>
+  <script type="module" src="./main.js"></script>
+</html>

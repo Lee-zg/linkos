@@ -153,23 +153,32 @@ type PluginManifest struct {
 }
 
 type PluginRecord struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Version     string          `json:"version"`
-	APIVersion  string          `json:"apiVersion"`
-	Status      string          `json:"status"`
-	Manifest    PluginManifest  `json:"manifest"`
-	Signature   string          `json:"signature,omitempty"`
-	Permissions []string        `json:"permissions"`
-	InstalledAt string          `json:"installedAt,omitempty"`
-	Health      string          `json:"health,omitempty"`
-	Previous    *PluginPrevious `json:"previous,omitempty"`
+	Source         string          `json:"source,omitempty"`
+	Runtime        string          `json:"runtime,omitempty"`
+	Revision       int64           `json:"revision"`
+	ArtifactDigest string          `json:"artifactDigest,omitempty"`
+	CanRollback    bool            `json:"canRollback"`
+	Actions        []string        `json:"actions"`
+	HealthReason   string          `json:"healthReason,omitempty"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Version        string          `json:"version"`
+	APIVersion     string          `json:"apiVersion"`
+	Status         string          `json:"status"`
+	Manifest       PluginManifest  `json:"manifest"`
+	Signature      string          `json:"signature,omitempty"`
+	Permissions    []string        `json:"permissions"`
+	InstalledAt    string          `json:"installedAt,omitempty"`
+	Health         string          `json:"health,omitempty"`
+	Previous       *PluginPrevious `json:"previous,omitempty"`
 }
 
 type PluginPrevious struct {
-	Manifest  PluginManifest `json:"manifest"`
-	Signature string         `json:"signature,omitempty"`
-	Status    string         `json:"status"`
+	ArtifactDigest string         `json:"artifactDigest,omitempty"`
+	Source         string         `json:"source,omitempty"`
+	Manifest       PluginManifest `json:"manifest"`
+	Signature      string         `json:"signature,omitempty"`
+	Status         string         `json:"status"`
 }
 
 type CodeFile struct {

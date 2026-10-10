@@ -236,6 +236,10 @@ var sqliteMigrations = [][]string{
 		`DROP TABLE IF EXISTS plugins`,
 		`DROP TABLE IF EXISTS plugin_versions`,
 	},
+	{
+		`CREATE TABLE plugin_registry (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`INSERT INTO plugin_registry(id,payload,updated_at) SELECT 1, COALESCE(json_extract(payload,'$.plugins'),'{}'), updated_at FROM mvp_state WHERE id=1`,
+	},
 }
 
 func (b *sqliteBackend) migrate() error {

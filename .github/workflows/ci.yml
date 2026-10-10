@@ -18,6 +18,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @linkos/web typecheck
+      - run: pnpm --filter @linkos/web exec tsc --noEmit --target ES2022 --module ESNext --moduleResolution bundler --lib ES2022,DOM ../../packages/plugin-sdk/src/index.ts
       - run: pnpm test:web
       - run: pnpm --filter @linkos/web build
   go:
@@ -32,6 +33,33 @@ jobs:
           go-version: "1.25"
       - run: go test ./...
         working-directory: services/${{ matrix.service }}
+
+  plugin-acceptance:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: apps/web
+      - run: pnpm test:plugins
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: plugin-traces-${{ matrix.os }}
+          path: apps/web/test-results
 
   windows-regression:
     runs-on: windows-latest
@@ -94,6 +122,11 @@ jobs:
       - run: node scripts/smoke-release.mjs ${{ matrix.binary }}
         env:
           LINKOS_SLOW_SMOKE: "1"
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: apps/web
+      - run: pnpm test:plugins
+        env:
+          LINKOS_PLUGIN_SMOKE_BINARY: ${{ matrix.binary }}
       - uses: actions/upload-artifact@v4
         with:
           name: delivery-${{ matrix.os }}

@@ -30,6 +30,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: go test ./services/gateway/... ./services/runner/...
       - run: pnpm --filter @linkos/web typecheck
+      - run: pnpm --filter @linkos/web exec tsc --noEmit --target ES2022 --module ESNext --moduleResolution bundler --lib ES2022,DOM ../../packages/plugin-sdk/src/index.ts
+      - run: pnpm test:web
       - name: Build packages
         id: version
         env:
@@ -40,6 +42,11 @@ jobs:
           echo "LINKOS_RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - run: node scripts/smoke-release.mjs "release/linkos-${LINKOS_RELEASE_VERSION}-linux-amd64/linkos"
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: apps/web
+      - run: pnpm test:plugins
+        env:
+          LINKOS_PLUGIN_SMOKE_BINARY: release/linkos-${{ steps.version.outputs.version }}-linux-amd64/linkos
       - uses: actions/upload-artifact@v4
         with:
           name: release-packages
@@ -53,9 +60,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.5
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: apps/web
       - uses: actions/download-artifact@v4
         with:
           name: release-packages
@@ -65,6 +79,9 @@ jobs:
           $archive = Get-ChildItem release/*windows-amd64.zip | Select-Object -First 1
           Expand-Archive -LiteralPath $archive.FullName -DestinationPath release/windows-smoke
           node scripts/smoke-release.mjs release/windows-smoke/linkos.exe
+      - run: pnpm test:plugins
+        env:
+          LINKOS_PLUGIN_SMOKE_BINARY: release/windows-smoke/linkos.exe
   image:
     needs: [packages, windows-package, container-smoke]
     runs-on: ubuntu-latest

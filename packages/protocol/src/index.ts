@@ -236,7 +236,12 @@ export interface MessageCreateInput {
 }
 
 export interface MessageBlock {
-  type: "text" | "file.reference" | "code.reference" | "code.snippet" | "run.result";
+  type:
+    | "text"
+    | "file.reference"
+    | "code.reference"
+    | "code.snippet"
+    | "run.result";
   value: Record<string, unknown>;
 }
 
@@ -298,12 +303,7 @@ export interface AcceptedMessage {
 }
 
 export type UploadStatus =
-  | "created"
-  | "uploading"
-  | "verifying"
-  | "completed"
-  | "failed"
-  | "canceled";
+  "created" | "uploading" | "verifying" | "completed" | "failed" | "canceled";
 
 export interface UploadCreateInput {
   name: string;
@@ -479,6 +479,15 @@ export type PluginStatus =
   | "failed";
 
 export interface PluginRecord {
+  source?: "builtin" | "package" | "legacy";
+  runtime?: "native" | "iframe";
+  revision: number;
+  artifactDigest?: string;
+  canRollback: boolean;
+  actions: Array<
+    "open" | "enable" | "disable" | "install" | "uninstall" | "rollback"
+  >;
+  healthReason?: string;
   id: string;
   name: string;
   version: string;
@@ -489,7 +498,47 @@ export interface PluginRecord {
   permissions: string[];
   installedAt?: string;
   health?: "healthy" | "degraded" | "failed";
-  previous?: { manifest: PluginManifest; signature?: string; status: PluginStatus };
+  previous?: {
+    manifest: PluginManifest;
+    signature?: string;
+    status: PluginStatus;
+    artifactDigest?: string;
+    source?: string;
+  };
+}
+
+export interface PluginPackageInspection {
+  stageId: string;
+  manifest: PluginManifest;
+  artifactDigest: string;
+  trusted: boolean;
+  signature?: string;
+  expectedRevision: number;
+  addedPermissions: string[];
+  removedPermissions: string[];
+  expiresAt: string;
+}
+export interface PluginViewTicket {
+  nonce: string;
+  protocol: "1.0";
+  src: string;
+  expiresAt: string;
+}
+
+export interface PluginHostInit {
+  type:"linkos.host.init";
+  pluginId:string;
+  version:string;
+  protocol:"1.0";
+  nonce:string;
+  permissions:string[];
+}
+export interface PluginReady {
+  type:"linkos.plugin.ready";
+  pluginId:string;
+  version:string;
+  protocol:"1.0";
+  nonce:string;
 }
 
 export interface CodeFile {

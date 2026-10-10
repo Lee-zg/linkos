@@ -14,12 +14,19 @@ import type {
   CodeFile,
   CodeVersion,
   PluginRecord,
+  PluginPackageInspection,
+  PluginViewTicket,
   RunnerInfo,
   ResourceRecord,
   ResourceShareLink,
   WorkspaceSnapshot,
 } from "@linkos/protocol";
-import { clearSession, loadRefreshToken, loadToken, saveSession } from "./session";
+import {
+  clearSession,
+  loadRefreshToken,
+  loadToken,
+  saveSession,
+} from "./session";
 import { getOrCreateDeviceIdentity } from "./deviceIdentity";
 
 let accessToken: string | null = loadToken();
@@ -27,31 +34,60 @@ let refreshToken: string | null = loadRefreshToken();
 const GATEWAY_KEY = "linkos.gateway_base";
 
 export function getGatewayBase(): string {
-  try { return window.localStorage.getItem(GATEWAY_KEY) ?? ""; } catch { return ""; }
+  try {
+    return window.localStorage.getItem(GATEWAY_KEY) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 export function setGatewayBase(value: string): void {
+  const previous = getGatewayBase();
   const normalized = value.trim().replace(/\/$/, "");
   if (normalized) {
     const parsed = new URL(normalized);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("网关地址必须使用 http 或 https");
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      throw new Error("网关地址必须使用 http 或 https");
   }
-  try { if (normalized) window.localStorage.setItem(GATEWAY_KEY, normalized); else window.localStorage.removeItem(GATEWAY_KEY); } catch { /* keep current tab usable */ }
+  try {
+    if (normalized) window.localStorage.setItem(GATEWAY_KEY, normalized);
+    else window.localStorage.removeItem(GATEWAY_KEY);
+  } catch {
+    /* keep current tab usable */
+  }
+  if (
+    normalized !== previous &&
+    typeof document !== "undefined" &&
+    document.querySelector("meta[data-linkos-plugin-frames]")
+  ) {
+    clearSession();
+    window.location.reload();
+  }
 }
 
-export function apiURL(path: string): string { return `${getGatewayBase()}${path}`; }
+export function apiURL(path: string): string {
+  return `${getGatewayBase()}${path}`;
+}
 
 class ApiError extends Error {
+  traceId?: string;
   status: number;
   code?: string;
   details?: Record<string, unknown>;
 
-  constructor(status: number, message: string, code?: string, details?: Record<string, unknown>) {
+  constructor(
+    status: number,
+    message: string,
+    code?: string,
+    details?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.details = details;
+    this.traceId =
+      typeof details?.traceId === "string" ? details.traceId : undefined;
   }
 }
 
@@ -64,7 +100,7 @@ function apiErrorFromPayload(status: number, payload: unknown): ApiError {
   const message =
     typeof record.message === "string"
       ? record.message
-      : code ?? `请求失败（${status}）`;
+      : (code ?? `请求失败（${status}）`);
   return new ApiError(status, message, code, record);
 }
 
@@ -73,7 +109,8 @@ async function request<T>(
   init?: RequestInit,
 ): Promise<T> {
   const url = typeof input === "string" ? input : input.toString();
-  const resolvedInput = typeof input === "string" && input.startsWith("/") ? apiURL(input) : input;
+  const resolvedInput =
+    typeof input === "string" && input.startsWith("/") ? apiURL(input) : input;
   if (
     !url.endsWith("/api/v1/sessions") &&
     !url.endsWith("/api/v1/healthz") &&
@@ -107,11 +144,17 @@ async function request<T>(
     }
   }
 
-  if (response.status === 401 && refreshToken && !url.endsWith("/api/v1/sessions/refresh")) {
+  if (
+    response.status === 401 &&
+    refreshToken &&
+    !url.endsWith("/api/v1/sessions/refresh")
+  ) {
     try {
       const rotated = await refreshSession(refreshToken);
       if (rotated) return request<T>(input, init);
-    } catch { /* fall through to the original auth error */ }
+    } catch {
+      /* fall through to the original auth error */
+    }
   }
   if (!response.ok) {
     throw apiErrorFromPayload(response.status, payload);
@@ -151,20 +194,34 @@ export async function createSession(
     if (identity) {
       // The gateway issues challenges for both new and registered devices.
       // Do not turn network/auth/endpoint failures into unsigned registration.
-      const challengeResponse = await fetch(apiURL("/api/v1/sessions/challenge"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ workspaceId, deviceId: identity.deviceId }),
-      });
-      const challenge = await challengeResponse.json().catch(() => undefined) as
+      const challengeResponse = await fetch(
+        apiURL("/api/v1/sessions/challenge"),
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspaceId, deviceId: identity.deviceId }),
+        },
+      );
+      const challenge = (await challengeResponse
+        .json()
+        .catch(() => undefined)) as
         | { challengeId?: unknown; deviceId?: unknown; message?: unknown }
         | undefined;
       if (!challengeResponse.ok) {
         throw apiErrorFromPayload(challengeResponse.status, challenge);
       }
-      if (!challenge || typeof challenge.challengeId !== "string" || !challenge.challengeId ||
-          challenge.deviceId !== identity.deviceId || typeof challenge.message !== "string" || !challenge.message) {
-        throw new ApiError(challengeResponse.status, "服务器返回了无效设备验证请求");
+      if (
+        !challenge ||
+        typeof challenge.challengeId !== "string" ||
+        !challenge.challengeId ||
+        challenge.deviceId !== identity.deviceId ||
+        typeof challenge.message !== "string" ||
+        !challenge.message
+      ) {
+        throw new ApiError(
+          challengeResponse.status,
+          "服务器返回了无效设备验证请求",
+        );
       }
       body.challengeId = challenge.challengeId;
       body.signature = await identity.signChallenge(challenge.message);
@@ -182,8 +239,7 @@ export async function createSession(
     );
   }
   const payload = (await response.json().catch(() => undefined)) as
-    | SessionToken
-    | undefined;
+    SessionToken | undefined;
   if (!response.ok || !payload) {
     throw apiErrorFromPayload(response.status, payload);
   }
@@ -192,14 +248,18 @@ export async function createSession(
   }
   accessToken = payload.accessToken;
   refreshToken = payload.refreshToken ?? null;
-  saveSession(payload.accessToken, {
-    userId: payload.userId,
-    displayName: payload.displayName,
-    role: payload.role,
-    accessType: payload.accessType,
-    status: payload.status,
-    workspaceId: payload.workspaceId,
-  }, refreshToken ?? undefined);
+  saveSession(
+    payload.accessToken,
+    {
+      userId: payload.userId,
+      displayName: payload.displayName,
+      role: payload.role,
+      accessType: payload.accessType,
+      status: payload.status,
+      workspaceId: payload.workspaceId,
+    },
+    refreshToken ?? undefined,
+  );
   return payload;
 }
 
@@ -247,13 +307,34 @@ export function dropSession(): void {
 }
 
 async function refreshSession(token: string): Promise<boolean> {
-  const response = await fetch(apiURL("/api/v1/sessions/refresh"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refreshToken: token }) });
-  if (!response.ok) { dropSession(); return false; }
+  const response = await fetch(apiURL("/api/v1/sessions/refresh"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ refreshToken: token }),
+  });
+  if (!response.ok) {
+    dropSession();
+    return false;
+  }
   const payload = (await response.json()) as SessionToken;
-  if (!payload.accessToken) { dropSession(); return false; }
+  if (!payload.accessToken) {
+    dropSession();
+    return false;
+  }
   accessToken = payload.accessToken;
   refreshToken = payload.refreshToken ?? null;
-  saveSession(payload.accessToken, { userId: payload.userId, displayName: payload.displayName, role: payload.role, accessType: payload.accessType, status: payload.status, workspaceId: payload.workspaceId }, refreshToken ?? undefined);
+  saveSession(
+    payload.accessToken,
+    {
+      userId: payload.userId,
+      displayName: payload.displayName,
+      role: payload.role,
+      accessType: payload.accessType,
+      status: payload.status,
+      workspaceId: payload.workspaceId,
+    },
+    refreshToken ?? undefined,
+  );
   return true;
 }
 
@@ -270,17 +351,15 @@ export function listAccessRecords() {
 }
 
 export function approveAccessRecord(id: string) {
-  return request<AccessRecord>(
-    `/api/v1/admin/access-records/${id}/approve`,
-    { method: "POST" },
-  );
+  return request<AccessRecord>(`/api/v1/admin/access-records/${id}/approve`, {
+    method: "POST",
+  });
 }
 
 export function rejectAccessRecord(id: string) {
-  return request<AccessRecord>(
-    `/api/v1/admin/access-records/${id}/reject`,
-    { method: "POST" },
-  );
+  return request<AccessRecord>(`/api/v1/admin/access-records/${id}/reject`, {
+    method: "POST",
+  });
 }
 
 export function listAuditEntries() {
@@ -312,65 +391,138 @@ export function submitJob(spec: JobSpec) {
 }
 
 export function listChannels() {
-  return request<{ items: ChatChannel[]; nextCursor?: string }>("/api/v1/channels");
+  return request<{ items: ChatChannel[]; nextCursor?: string }>(
+    "/api/v1/channels",
+  );
 }
 
-export function listChatMembers() { return request<{ items: Array<{ userId: string; displayName: string }> }>("/api/v1/chat-members"); }
+export function listChatMembers() {
+  return request<{ items: Array<{ userId: string; displayName: string }> }>(
+    "/api/v1/chat-members",
+  );
+}
 
 export function getFilePreferences() {
-  return request<import("@linkos/protocol").FilePreferences>("/api/v1/file-preferences");
+  return request<import("@linkos/protocol").FilePreferences>(
+    "/api/v1/file-preferences",
+  );
 }
 
 export function setReceiveFolder(receiveFolderId: string) {
-  return request<import("@linkos/protocol").FilePreferences>("/api/v1/file-preferences", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ receiveFolderId }) });
+  return request<import("@linkos/protocol").FilePreferences>(
+    "/api/v1/file-preferences",
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ receiveFolderId }),
+    },
+  );
 }
 
-export function operateFiles(input: import("@linkos/protocol").FileOperationInput) {
-  return request<{ items: FileResource[] }>("/api/v1/file-operations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+export function operateFiles(
+  input: import("@linkos/protocol").FileOperationInput,
+) {
+  return request<{ items: FileResource[] }>("/api/v1/file-operations", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
 }
 
 export function receiveAttachments(messageId: string) {
-  return request<{ items: FileResource[] }>(`/api/v1/chat-receipts/${encodeURIComponent(messageId)}`, { method: "POST" });
+  return request<{ items: FileResource[] }>(
+    `/api/v1/chat-receipts/${encodeURIComponent(messageId)}`,
+    { method: "POST" },
+  );
 }
 
-export async function previewFile(resourceId: string, signal: AbortSignal): Promise<Blob> {
-  const response = await fetch(apiURL(`/api/v1/files/${encodeURIComponent(resourceId)}/content`), { headers: { Authorization: `Bearer ${getSessionToken()}` }, signal });
+export async function previewFile(
+  resourceId: string,
+  signal: AbortSignal,
+): Promise<Blob> {
+  const response = await fetch(
+    apiURL(`/api/v1/files/${encodeURIComponent(resourceId)}/content`),
+    { headers: { Authorization: `Bearer ${getSessionToken()}` }, signal },
+  );
   if (!response.ok) throw new Error(`预览失败 (${response.status})`);
   const limit = 5 * 1024 * 1024;
-  if (Number(response.headers.get("content-length")) > limit) { await response.body?.cancel(); throw new Error("大于 5 MB 的文件请下载查看"); }
+  if (Number(response.headers.get("content-length")) > limit) {
+    await response.body?.cancel();
+    throw new Error("大于 5 MB 的文件请下载查看");
+  }
   const reader = response.body?.getReader();
   if (!reader) throw new Error("无法读取文件内容");
   const chunks: Uint8Array<ArrayBuffer>[] = [];
   let size = 0;
-  try { for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > limit) throw new Error("大于 5 MB 的文件请下载查看"); chunks.push(new Uint8Array(value)); } }
-  finally { await reader.cancel(); }
-  return new Blob(chunks, { type: response.headers.get("content-type") ?? "application/octet-stream" });
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) throw new Error("大于 5 MB 的文件请下载查看");
+      chunks.push(new Uint8Array(value));
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return new Blob(chunks, {
+    type: response.headers.get("content-type") ?? "application/octet-stream",
+  });
 }
 
-export function createChannel(input: { name: string; kind?: "channel" | "direct"; memberIds?: string[] }) {
-  return request<ChatChannel>("/api/v1/channels", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+export function createChannel(input: {
+  name: string;
+  kind?: "channel" | "direct";
+  memberIds?: string[];
+}) {
+  return request<ChatChannel>("/api/v1/channels", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
 }
 
-export function listMessages(input: { channelId?: string; q?: string; cursor?: string; limit?: number; newest?: boolean } = {}) {
+export function listMessages(
+  input: {
+    channelId?: string;
+    q?: string;
+    cursor?: string;
+    limit?: number;
+    newest?: boolean;
+  } = {},
+) {
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(input)) if (value !== undefined && value !== "") params.set(key, String(value));
-  return request<{ items: ChatMessage[]; nextCursor?: string }>(`/api/v1/messages?${params}`);
+  for (const [key, value] of Object.entries(input))
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  return request<{ items: ChatMessage[]; nextCursor?: string }>(
+    `/api/v1/messages?${params}`,
+  );
 }
 
 export function listThreadMessages(id: string) {
-  return request<{ items: ChatMessage[] }>(`/api/v1/messages/${encodeURIComponent(id)}/thread`);
+  return request<{ items: ChatMessage[] }>(
+    `/api/v1/messages/${encodeURIComponent(id)}/thread`,
+  );
 }
 
 export function editMessage(id: string, body: string) {
-  return request<ChatMessage>(`/api/v1/messages/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ body }) });
+  return request<ChatMessage>(`/api/v1/messages/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ body }),
+  });
 }
 
 export function deleteMessage(id: string) {
-  return request<ChatMessage>(`/api/v1/messages/${encodeURIComponent(id)}`, { method: "DELETE" });
+  return request<ChatMessage>(`/api/v1/messages/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function listCodeFiles(projectId = "project_gateway") {
-  return request<{ items: CodeFile[]; nextCursor?: string }>(`/api/v1/code/projects/${encodeURIComponent(projectId)}`);
+  return request<{ items: CodeFile[]; nextCursor?: string }>(
+    `/api/v1/code/projects/${encodeURIComponent(projectId)}`,
+  );
 }
 
 export function getCodeFile(id: string) {
@@ -384,17 +536,43 @@ export function getCodeFile(id: string) {
   }>(`/api/v1/code/files/${encodeURIComponent(id)}`);
 }
 
-export function saveCodeFile(id: string, content: string, baseVersion: string, force = false) {
+export function saveCodeFile(
+  id: string,
+  content: string,
+  baseVersion: string,
+  force = false,
+) {
   const suffix = force ? "?force=true" : "";
-  return request<CodeVersion>(`/api/v1/code/files/${encodeURIComponent(id)}/save${suffix}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content, baseVersion }) });
+  return request<CodeVersion>(
+    `/api/v1/code/files/${encodeURIComponent(id)}/save${suffix}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content, baseVersion }),
+    },
+  );
 }
 
-export function saveCodeFileAs(input: { projectId: string; path: string; language: string; content: string }) {
-  return request<{ file: CodeFile; version: CodeVersion }>("/api/v1/code/files", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+export function saveCodeFileAs(input: {
+  projectId: string;
+  path: string;
+  language: string;
+  content: string;
+}) {
+  return request<{ file: CodeFile; version: CodeVersion }>(
+    "/api/v1/code/files",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export function listRunners() {
-  return request<{ items: RunnerInfo[]; nextCursor?: string }>("/api/v1/runners");
+  return request<{ items: RunnerInfo[]; nextCursor?: string }>(
+    "/api/v1/runners",
+  );
 }
 
 export function getJob(id: string) {
@@ -402,22 +580,50 @@ export function getJob(id: string) {
 }
 
 export function listJobLogs(id: string) {
-  return request<{ items: Array<{ jobId: string; seq: number; level: string; chunk: string; at: string }>; nextCursor?: string }>(`/api/v1/jobs/${encodeURIComponent(id)}/logs`);
+  return request<{
+    items: Array<{
+      jobId: string;
+      seq: number;
+      level: string;
+      chunk: string;
+      at: string;
+    }>;
+    nextCursor?: string;
+  }>(`/api/v1/jobs/${encodeURIComponent(id)}/logs`);
 }
 
 export function listJobArtifacts(id: string) {
-  return request<{ items: Array<{ id: string; jobId: string; name: string; resourceId?: string; size: number; contentHash?: string; createdAt: string }>; nextCursor?: string }>(`/api/v1/jobs/${encodeURIComponent(id)}/artifacts`);
+  return request<{
+    items: Array<{
+      id: string;
+      jobId: string;
+      name: string;
+      resourceId?: string;
+      size: number;
+      contentHash?: string;
+      createdAt: string;
+    }>;
+    nextCursor?: string;
+  }>(`/api/v1/jobs/${encodeURIComponent(id)}/artifacts`);
 }
 
 export function cancelJob(id: string) {
-  return request<JobRef>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+  return request<JobRef>(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
 }
 
 export function listPlugins() {
-  return request<{ items: PluginRecord[]; nextCursor?: string }>("/api/v1/plugins");
+  return request<{ items: PluginRecord[]; nextCursor?: string }>(
+    "/api/v1/plugins",
+  );
 }
 
-export type FileResource = ResourceRecord & { canRead?: boolean; canWrite?: boolean; canCreateChild?: boolean };
+export type FileResource = ResourceRecord & {
+  canRead?: boolean;
+  canWrite?: boolean;
+  canCreateChild?: boolean;
+};
 export interface ResourceListing {
   items: FileResource[];
   nextCursor?: string;
@@ -428,7 +634,18 @@ export interface ResourceListing {
   canCreateChild: boolean;
 }
 
-export function listResources(input: { scope?: string; parentId?: string; recent?: boolean; q?: string; sortBy?: "name" | "updatedAt" | "size"; sortOrder?: "asc" | "desc"; cursor?: string; limit?: number } = {}) {
+export function listResources(
+  input: {
+    scope?: string;
+    parentId?: string;
+    recent?: boolean;
+    q?: string;
+    sortBy?: "name" | "updatedAt" | "size";
+    sortOrder?: "asc" | "desc";
+    cursor?: string;
+    limit?: number;
+  } = {},
+) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(input)) {
     if (value !== undefined && value !== "") {
@@ -444,7 +661,12 @@ export function getResource(id: string) {
   return request<FileResource>(`/api/v1/resources/${encodeURIComponent(id)}`);
 }
 
-export function createFolder(input: { name: string; parentId?: string; meta?: Record<string, unknown>; acl?: unknown }) {
+export function createFolder(input: {
+  name: string;
+  parentId?: string;
+  meta?: Record<string, unknown>;
+  acl?: unknown;
+}) {
   return request<ResourceRecord>("/api/v1/resources", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -453,53 +675,170 @@ export function createFolder(input: { name: string; parentId?: string; meta?: Re
 }
 
 export function moveResource(id: string, parentId: string) {
-  return request<ResourceRecord>(`/api/v1/resources/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ parentId }),
-  });
+  return request<ResourceRecord>(
+    `/api/v1/resources/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ parentId }),
+    },
+  );
 }
 
 export function deleteResource(id: string, recursive = false) {
   const params = new URLSearchParams();
   if (recursive) params.set("recursive", "true");
-  return request<{ status: string; id: string }>(`/api/v1/resources/${encodeURIComponent(id)}?${params}`, { method: "DELETE" });
+  return request<{ status: string; id: string }>(
+    `/api/v1/resources/${encodeURIComponent(id)}?${params}`,
+    { method: "DELETE" },
+  );
 }
 
-export function updateResource(id: string, patch: { name?: string; meta?: Record<string, unknown>; acl?: unknown }) {
-  return request<ResourceRecord>(`/api/v1/resources/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch) });
+export function updateResource(
+  id: string,
+  patch: { name?: string; meta?: Record<string, unknown>; acl?: unknown },
+) {
+  return request<ResourceRecord>(
+    `/api/v1/resources/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
 }
 
 export function createResourceShare(id: string, ttlSeconds?: number) {
-  return request<ResourceShareLink>(`/api/v1/resources/${encodeURIComponent(id)}/share`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ttlSeconds }) });
+  return request<ResourceShareLink>(
+    `/api/v1/resources/${encodeURIComponent(id)}/share`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ttlSeconds }),
+    },
+  );
 }
 
-export function setPluginStatus(id: string, action: "enable" | "disable" | "rollback") {
-  return request<PluginRecord>(`/api/v1/plugins/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+export function setPluginStatus(
+  id: string,
+  action: "enable" | "disable" | "rollback" | "uninstall",
+  expectedRevision: number,
+) {
+  return request<PluginRecord>(
+    `/api/v1/plugins/${encodeURIComponent(id)}/${action}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision }),
+    },
+  );
 }
 
-export function installPlugin(manifest: PluginRecord["manifest"], signature = "") {
-  return request<PluginRecord>(`/api/v1/plugins/${encodeURIComponent(manifest.id)}/install`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ manifest, signature }) });
+export function installPlugin(
+  stage: PluginPackageInspection,
+  probeNonce: string,
+) {
+  return request<PluginRecord>(
+    `/api/v1/plugins/${encodeURIComponent(stage.manifest.id)}/install`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        stageId: stage.stageId,
+        expectedRevision: stage.expectedRevision,
+        probeNonce,
+      }),
+    },
+  );
+}
+export function inspectPluginPackage(file: File) {
+  if (file.size > 50 * 1024 * 1024)
+    return Promise.reject(new Error("插件包不能超过 50 MiB"));
+  return request<PluginPackageInspection>("/api/v1/plugin-packages/inspect", {
+    method: "POST",
+    headers: { "content-type": "application/zip" },
+    body: file,
+  });
+}
+export function getPluginTicket(
+  id: string,
+  stageId?: string,
+  signal?: AbortSignal,
+) {
+  return request<PluginViewTicket>(
+    `/api/v1/plugins/${encodeURIComponent(id)}/ticket`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stageId }),
+      signal,
+    },
+  );
+}
+export function pluginRPC<T>(
+  plugin: PluginRecord,
+  method: string,
+  params: unknown,
+  signal?: AbortSignal,
+) {
+  return request<{ result: T }>(
+    `/api/v1/plugins/${encodeURIComponent(plugin.id)}/rpc`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        method,
+        params,
+        expectedRevision: plugin.revision,
+      }),
+      signal,
+    },
+  ).then((value) => value.result);
 }
 
 export function listDevices() {
-  return request<{ items: Array<Record<string, unknown>>; nextCursor?: string }>("/api/v1/devices");
+  return request<{
+    items: Array<Record<string, unknown>>;
+    nextCursor?: string;
+  }>("/api/v1/devices");
 }
 
 export function createInvite() {
-  return request<{ code: string; expiresAt: string; singleUse: boolean }>("/api/v1/admin/invites", { method: "POST" });
+  return request<{ code: string; expiresAt: string; singleUse: boolean }>(
+    "/api/v1/admin/invites",
+    { method: "POST" },
+  );
 }
 
 export function listMembers() {
-  return request<{ items: Array<{ userId: string; displayName: string; role: string; status: string; deviceCount: number }>; nextCursor?: string }>("/api/v1/admin/members");
+  return request<{
+    items: Array<{
+      userId: string;
+      displayName: string;
+      role: string;
+      status: string;
+      deviceCount: number;
+    }>;
+    nextCursor?: string;
+  }>("/api/v1/admin/members");
 }
 
 export function updateMemberRole(userId: string, role: string) {
-  return request<{ userId: string; role: string }>(`/api/v1/admin/members/${encodeURIComponent(userId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ role }) });
+  return request<{ userId: string; role: string }>(
+    `/api/v1/admin/members/${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role }),
+    },
+  );
 }
 
 export function revokeDevice(id: string) {
-  return request<{ id: string; status: string }>(`/api/v1/devices/${encodeURIComponent(id)}`, { method: "POST" });
+  return request<{ id: string; status: string }>(
+    `/api/v1/devices/${encodeURIComponent(id)}`,
+    { method: "POST" },
+  );
 }
 
 export { ApiError };

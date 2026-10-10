@@ -4,13 +4,15 @@ import {
   useContext,
   useMemo,
   useReducer,
+  useEffect,
   type ReactNode,
 } from "react";
-import type { AppId, WindowState } from "./types";
-import { getApp } from "./apps";
+import type { DynamicAppId, AppDefinition, WindowState } from "./types";
+import { useAppRegistry } from "./app-registry";
 
 type WindowAction =
-  | { type: "OPEN"; appId: AppId }
+  | { type: "OPEN"; appId: DynamicAppId; app: AppDefinition }
+  | { type: "RECONCILE"; available: DynamicAppId[] }
   | { type: "CLOSE"; id: string }
   | { type: "FOCUS"; id: string }
   | { type: "MINIMIZE"; id: string }
@@ -37,7 +39,7 @@ function windowsReducer(
             : w,
         );
       }
-      const app = getApp(action.appId);
+      const app = action.app;
       const offset = (windows.length % 8) * 24;
       const viewportW = window.innerWidth;
       const viewportH = window.innerHeight;
@@ -73,6 +75,8 @@ function windowsReducer(
     }
     case "CLOSE":
       return windows.filter((w) => w.id !== action.id);
+    case "RECONCILE":
+      return windows.filter((w) => action.available.includes(w.appId));
     case "FOCUS":
       return windows.map((w) =>
         w.id === action.id ? { ...w, minimized: false, z: nextZ(windows) } : w,
@@ -102,7 +106,7 @@ function windowsReducer(
 
 type WindowManager = {
   windows: WindowState[];
-  open: (appId: AppId) => void;
+  open: (appId: DynamicAppId) => void;
   close: (id: string) => void;
   focus: (id: string) => void;
   minimize: (id: string) => void;
@@ -115,10 +119,20 @@ type WindowManager = {
 const WindowManagerContext = createContext<WindowManager | null>(null);
 
 export function WindowManagerProvider({ children }: { children: ReactNode }) {
+  const catalog = useAppRegistry();
   const [windows, dispatch] = useReducer(windowsReducer, []);
+  useEffect(() => {
+    dispatch({
+      type: "RECONCILE",
+      available: catalog.apps.map((app) => app.id),
+    });
+  }, [catalog.apps]);
   const open = useCallback(
-    (appId: AppId) => dispatch({ type: "OPEN", appId }),
-    [],
+    (appId: DynamicAppId) => {
+      const app = catalog.getApp(appId);
+      if (app) dispatch({ type: "OPEN", appId, app });
+    },
+    [catalog.getApp],
   );
   const close = useCallback(
     (id: string) => dispatch({ type: "CLOSE", id }),
@@ -132,10 +146,7 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
     (id: string) => dispatch({ type: "MINIMIZE", id }),
     [],
   );
-  const minimizeAll = useCallback(
-    () => dispatch({ type: "MINIMIZE_ALL" }),
-    [],
-  );
+  const minimizeAll = useCallback(() => dispatch({ type: "MINIMIZE_ALL" }), []);
   const toggleMaximize = useCallback(
     (id: string) => dispatch({ type: "TOGGLE_MAXIMIZE", id }),
     [],
@@ -161,7 +172,17 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
       move,
       resize,
     }),
-    [windows, open, close, focus, minimize, minimizeAll, toggleMaximize, move, resize],
+    [
+      windows,
+      open,
+      close,
+      focus,
+      minimize,
+      minimizeAll,
+      toggleMaximize,
+      move,
+      resize,
+    ],
   );
   return (
     <WindowManagerContext.Provider value={value}>

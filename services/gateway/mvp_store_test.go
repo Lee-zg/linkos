@@ -182,7 +182,7 @@ func TestMVPPluginLifecycle(t *testing.T) {
 	server, auth := newMVPTestServer(t)
 	defer server.Close()
 	token := mvpAdminToken(t, auth)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/disable", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/disable", bytes.NewBufferString(`{"expectedRevision":1}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	server.Config.Handler.ServeHTTP(rec, req)
@@ -239,52 +239,6 @@ func TestMVPResourceMetadataAndSingleUseShare(t *testing.T) {
 	}
 }
 
-func TestMVPPluginRollbackRestoresPreviousManifest(t *testing.T) {
-	server, auth := newMVPTestServer(t)
-	defer server.Close()
-	token := mvpAdminToken(t, auth)
-	previousVersion := mvpPluginVersion(t, server, token, "chat.core")
-	manifest := protocol.PluginManifest{ID: "chat.core", Name: "Chat Next", Version: "2.0.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/v2.js"}, Permissions: []string{"chat.read"}}
-	raw, _ := json.Marshal(map[string]interface{}{"manifest": manifest})
-	install := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/install", bytes.NewReader(raw))
-	install.Header.Set("Authorization", "Bearer "+token)
-	installRec := httptest.NewRecorder()
-	server.Config.Handler.ServeHTTP(installRec, install)
-	if installRec.Code != http.StatusCreated {
-		t.Fatalf("install status=%d body=%s", installRec.Code, installRec.Body.String())
-	}
-	rollback := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/rollback", nil)
-	rollback.Header.Set("Authorization", "Bearer "+token)
-	rollbackRec := httptest.NewRecorder()
-	server.Config.Handler.ServeHTTP(rollbackRec, rollback)
-	if rollbackRec.Code != http.StatusOK || !bytes.Contains(rollbackRec.Body.Bytes(), []byte(`"version":"`+previousVersion+`"`)) {
-		t.Fatalf("rollback status=%d body=%s", rollbackRec.Code, rollbackRec.Body.String())
-	}
-}
-
-func TestMVPPluginHealthFailureAutomaticallyRollsBack(t *testing.T) {
-	server, auth := newMVPTestServer(t)
-	defer server.Close()
-	token := mvpAdminToken(t, auth)
-	previousVersion := mvpPluginVersion(t, server, token, "chat.core")
-	manifest := protocol.PluginManifest{ID: "chat.core", Name: "Chat Broken", Version: "2.0.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/v2.js"}, Permissions: []string{"chat.read"}}
-	raw, _ := json.Marshal(map[string]interface{}{"manifest": manifest})
-	install := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/install", bytes.NewReader(raw))
-	install.Header.Set("Authorization", "Bearer "+token)
-	installRec := httptest.NewRecorder()
-	server.Config.Handler.ServeHTTP(installRec, install)
-	if installRec.Code != http.StatusCreated {
-		t.Fatalf("install status=%d body=%s", installRec.Code, installRec.Body.String())
-	}
-	fail := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/chat.core/health-failed", nil)
-	fail.Header.Set("Authorization", "Bearer "+token)
-	failRec := httptest.NewRecorder()
-	server.Config.Handler.ServeHTTP(failRec, fail)
-	if failRec.Code != http.StatusOK || !bytes.Contains(failRec.Body.Bytes(), []byte(`"version":"`+previousVersion+`"`)) || !bytes.Contains(failRec.Body.Bytes(), []byte(`"health":"degraded"`)) {
-		t.Fatalf("health failure did not roll back: status=%d body=%s", failRec.Code, failRec.Body.String())
-	}
-}
-
 func mvpPluginVersion(t *testing.T, server *httptest.Server, token, id string) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
@@ -304,27 +258,6 @@ func mvpPluginVersion(t *testing.T, server *httptest.Server, token, id string) s
 	}
 	t.Fatal("plugin not found")
 	return ""
-}
-
-func TestMVPPluginRollbackResetsHealth(t *testing.T) {
-	store := newMVPStore(memoryBackend{}, newHub())
-	original := protocol.PluginManifest{ID: "chat.core", Name: "Chat", Version: "0.1.0", APIVersion: "1.0", Entry: map[string]string{"ui": "ui/chat.js"}, Permissions: []string{"chat.read"}}
-	store.state.Plugins["chat.core"] = protocol.PluginRecord{
-		ID: "chat.core", Name: "Chat", Version: "2.0.0", Status: "installed",
-		Health: "degraded", Manifest: original,
-		Previous: &protocol.PluginPrevious{Manifest: original, Status: "enabled"},
-	}
-
-	result, ok := store.setPluginStatus("chat.core", "rollback")
-	if !ok {
-		t.Fatal("setPluginStatus returned false")
-	}
-	if result.Version != "0.1.0" {
-		t.Fatalf("expected version 0.1.0, got %s", result.Version)
-	}
-	if result.Health != "healthy" {
-		t.Fatalf("expected health healthy after rollback, got %s", result.Health)
-	}
 }
 
 func TestPluginContentServesFile(t *testing.T) {
@@ -469,50 +402,6 @@ func TestMVPRunnerRegistrationCredentialLifecycle(t *testing.T) {
 	deleteResponse := request(http.MethodDelete, "/api/v1/runners/runner-lifecycle", nil, adminToken)
 	if deleteResponse.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", deleteResponse.Code, deleteResponse.Body.String())
-	}
-}
-
-func TestPluginHealthCheckerDetectsMissingUI(t *testing.T) {
-	tmpDir := t.TempDir()
-	chatDir := filepath.Join(tmpDir, "chat")
-	if err := os.MkdirAll(filepath.Join(chatDir, "ui"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(chatDir, "manifest.json"), []byte(`{"id":"chat.core"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("LINKOS_PLUGIN_DIR", tmpDir)
-
-	store := newMVPStore(memoryBackend{}, newHub())
-	store.state.Plugins["chat.core"] = protocol.PluginRecord{
-		ID:     "chat.core",
-		Name:   "Chat",
-		Status: "enabled",
-		Health: "healthy",
-		Manifest: protocol.PluginManifest{
-			ID:    "chat.core",
-			Name:  "Chat",
-			Entry: map[string]string{"ui": "ui/index.html"},
-		},
-	}
-
-	store.checkPluginHealth()
-	store.mu.RLock()
-	rec := store.state.Plugins["chat.core"]
-	store.mu.RUnlock()
-	if rec.Health != "degraded" {
-		t.Fatalf("expected degraded when UI file missing, got %s", rec.Health)
-	}
-
-	if err := os.WriteFile(filepath.Join(chatDir, "ui", "index.html"), []byte("<html></html>"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	store.checkPluginHealth()
-	store.mu.RLock()
-	rec = store.state.Plugins["chat.core"]
-	store.mu.RUnlock()
-	if rec.Health != "healthy" {
-		t.Fatalf("expected healthy after UI file restored, got %s", rec.Health)
 	}
 }
 

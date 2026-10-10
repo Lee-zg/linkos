@@ -65,6 +65,7 @@ async function exercise(base, passcode, restart) {
     );
     const response = await fetch(
       base + `/api/v1/plugins/${p.id}/content/${p.manifest.entry.ui}`,
+      { headers: { authorization: `Bearer ${token}` } },
     );
     assert.equal(response.status, 200);
     assert.match(await response.text(), /linkos.plugin.ready/);

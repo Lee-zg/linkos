@@ -10,9 +10,10 @@ export type AppId =
   | "plugins"
   | "settings"
   | "admin";
+export type DynamicAppId = AppId | `plugin:${string}`;
 
 export type AppDefinition = {
-  id: AppId;
+  id: DynamicAppId;
   name: string;
   icon: LucideIcon;
   gradient: string;
@@ -23,7 +24,7 @@ export type AppDefinition = {
 
 export type WindowState = {
   id: string;
-  appId: AppId;
+  appId: DynamicAppId;
   title: string;
   x: number;
   y: number;

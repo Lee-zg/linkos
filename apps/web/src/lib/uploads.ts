@@ -7,12 +7,18 @@ import { sha256 } from "js-sha256";
 import { ApiError, apiURL, getSessionToken } from "./api";
 import { evictCachedHash, getCachedHash, setCachedHash } from "./hashCache";
 import { loadProfile } from "./session";
+import { readDraft, writeDraft, removeDraft } from "./draft-storage";
 
 const DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024;
 const CONCURRENCY = 4;
 const PART_RETRIES = 2;
 const SESSION_INDEX_KEY = "linkos.upload-sessions";
 const RECORDS_KEY = "linkos.uploaded-files";
+const hashStorage = {
+  getItem: (key: string) => readDraft(key),
+  setItem: (key: string, value: string) => writeDraft(key, value),
+  removeItem: (key: string) => removeDraft(key),
+};
 
 export interface UploadProgress {
   phase: "hashing" | "uploading" | "finalizing";
@@ -99,7 +105,7 @@ export function rememberUploadedFile(
 
 function loadSessionIndex(): Record<string, string> {
   try {
-    const raw = localStorage.getItem(SESSION_INDEX_KEY);
+    const raw = readDraft(SESSION_INDEX_KEY);
     return raw ? (JSON.parse(raw) as Record<string, string>) : {};
   } catch {
     return {};
@@ -107,7 +113,7 @@ function loadSessionIndex(): Record<string, string> {
 }
 
 function saveSessionIndex(index: Record<string, string>) {
-  localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(index));
+  writeDraft(SESSION_INDEX_KEY, JSON.stringify(index));
 }
 
 function rememberSession(key: string, uploadId: string) {
@@ -153,10 +159,12 @@ async function streamFileHash(
   size: number,
   windowSize: number,
   onProgress: (hashedBytes: number) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const hasher = sha256.create();
   let offset = 0;
   while (offset < size) {
+    signal?.throwIfAborted();
     const window = await file.slice(offset, offset + windowSize).arrayBuffer();
     hasher.update(window);
     offset += window.byteLength;
@@ -166,6 +174,7 @@ async function streamFileHash(
 }
 
 interface UploadContext {
+  readonly signal?: AbortSignal;
   readonly scope: UploadScope;
   readonly headers: Record<string, string>;
   readonly parentId: string;
@@ -181,6 +190,7 @@ async function fetchJson<T>(
   init?: RequestInit,
 ): Promise<T> {
   const response = await fetch(`${context.scope.gatewayBase}${path}`, {
+    signal: context.signal,
     ...init,
     headers: { ...context.headers, ...init?.headers },
   });
@@ -211,10 +221,13 @@ export async function uploadFile(
   parentId: string,
   onProgress: (progress: UploadProgress) => void,
   chunkSize = DEFAULT_CHUNK_SIZE,
+  signal?: AbortSignal,
 ): Promise<UploadedEntryRecord> {
+  signal?.throwIfAborted();
   // Capture even before the first progress callback or hash await. All requests
   // (including a stale-cache retry) keep this gateway, credential and identity.
   const context: UploadContext = Object.freeze({
+    signal,
     scope: currentScope(),
     headers: authHeaders(),
     parentId,
@@ -233,7 +246,7 @@ export async function uploadFile(
       totalBytes: context.size,
     });
 
-  const cached = getCachedHash(localStorage, context);
+  const cached = getCachedHash(hashStorage, context);
   let contentHash: string;
   if (cached !== null) {
     contentHash = cached;
@@ -245,23 +258,25 @@ export async function uploadFile(
       context.size,
       chunkSize,
       reportHashing,
+      signal,
     );
-    setCachedHash(localStorage, context, contentHash);
+    setCachedHash(hashStorage, context, contentHash);
   }
 
   try {
     return await runUpload(file, context, contentHash, onProgress, chunkSize);
   } catch (error) {
     if (cached === null || !isHashMismatch(error)) throw error;
-    evictCachedHash(localStorage, context);
+    evictCachedHash(hashStorage, context);
     reportHashing(0);
     contentHash = await streamFileHash(
       file,
       context.size,
       chunkSize,
       reportHashing,
+      signal,
     );
-    setCachedHash(localStorage, context, contentHash);
+    setCachedHash(hashStorage, context, contentHash);
     return await runUpload(file, context, contentHash, onProgress, chunkSize);
   }
 }
@@ -358,6 +373,7 @@ async function runUpload(
     if (!received.has(partNo)) pending.push(partNo);
   }
   await runPool(pending, async (partNo) => {
+    context.signal?.throwIfAborted();
     const bytes = partSize(size, chunkSize, totalParts, partNo);
     const chunk = await file
       .slice(partNo * chunkSize, partNo * chunkSize + bytes)
@@ -368,6 +384,8 @@ async function runUpload(
     sentBytes += bytes;
     report();
   });
+
+  context.signal?.throwIfAborted();
 
   onProgress({
     phase: "finalizing",
@@ -382,6 +400,8 @@ async function runUpload(
     `/api/v1/uploads/${encodeURIComponent(session.id)}/complete`,
     {
       method: "POST",
+      // A completion already sent may finish when the app is disabled.
+      signal: null,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ contentHash }),
     },
@@ -475,6 +495,7 @@ async function sendPart(
 ): Promise<void> {
   let lastError: unknown = null;
   for (let attempt = 0; attempt <= PART_RETRIES; attempt++) {
+    context.signal?.throwIfAborted();
     try {
       await fetchJson(
         context,

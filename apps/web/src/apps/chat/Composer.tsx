@@ -12,6 +12,12 @@ import { uploadFile } from "../../lib/uploads";
 import { fileTransferPercent } from "../../lib/file-browser";
 import { Modal } from "../FileActions";
 import { readChatDraft } from "../../lib/chat-draft";
+import { readDraft, writeDraft, removeDraft } from "../../lib/draft-storage";
+import {
+  queueUpload,
+  pendingUploads,
+  finishUpload,
+} from "../../lib/paused-uploads";
 
 export function Composer({
   channelId,
@@ -29,7 +35,7 @@ export function Composer({
   const draftKey = `linkos.chat.draft:${JSON.stringify([getGatewayBase(), profile.workspaceId, profile.userId, channelId, threadId ?? ""])}`;
   const [draft] = useState(() => {
     try {
-      return readChatDraft(localStorage.getItem(draftKey));
+      return readChatDraft(readDraft(draftKey));
     } catch {
       return readChatDraft(null);
     }
@@ -40,8 +46,8 @@ export function Composer({
   const [uploading, setUploading] = useState("");
   const [error, setError] = useState("");
   const [codeOpen, setCodeOpen] = useState(false);
-  const [code, setCode] = useState("");
-  const [language, setLanguage] = useState("typescript");
+  const [code, setCode] = useState(draft.code ?? "");
+  const [language, setLanguage] = useState(draft.language ?? "typescript");
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const pending = useRef<MessageCreateInput | null>(
@@ -58,29 +64,36 @@ export function Composer({
   const busy = useRef(false);
   const uploadingRef = useRef(false);
   const mounted = useRef(true);
+  const uploadController = useRef<AbortController | null>(null);
+  const [pausedCount, setPausedCount] = useState(
+    () => pendingUploads(draftKey).length,
+  );
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      uploadController.current?.abort();
     };
   }, []);
   useEffect(() => {
     try {
-      if (body || blocks.length)
-        localStorage.setItem(
+      if (body || blocks.length || code)
+        writeDraft(
           draftKey,
           JSON.stringify({
             body,
             blocks,
+            code,
+            language,
             clientMsgId: pending.current?.clientMsgId,
           }),
         );
-      else localStorage.removeItem(draftKey);
+      else removeDraft(draftKey);
     } catch {
       /* storage can be disabled */
     }
-  }, [body, blocks, draftKey, sending]);
-  const attach = async (files: File[]) => {
+  }, [body, blocks, code, language, draftKey, sending]);
+  const attach = async (files: File[], parentId?: string) => {
     if (!connected || !preferences || uploadingRef.current || busy.current)
       return;
     if (files.length + blocks.length > 16) {
@@ -88,20 +101,46 @@ export function Composer({
       return;
     }
     uploadingRef.current = true;
+    const target = parentId ?? preferences.outgoingId;
+    const controller = new AbortController();
+    uploadController.current = controller;
+    for (const file of files) queueUpload(draftKey, { file, parentId: target });
     setError("");
     try {
       for (const file of files) {
+        controller.signal.throwIfAborted();
         setUploading(`正在准备 ${file.name}`);
         const record = await uploadFile(
           file,
-          preferences.outgoingId,
+          target,
           (progress) => {
             if (mounted.current)
               setUploading(
                 `${file.name} · ${progress.phase === "hashing" ? "校验" : "上传"} ${fileTransferPercent(progress)}%`,
               );
           },
+          undefined,
+          controller.signal,
         );
+        finishUpload(draftKey, file, target);
+        const attachment: MessageBlock = {
+          type: "file.reference",
+          value: {
+            resourceId: record.entryId,
+            name: record.name,
+            size: record.size,
+          },
+        };
+        if (!mounted.current) {
+          const saved = readChatDraft(readDraft(draftKey));
+          writeDraft(
+            draftKey,
+            JSON.stringify({
+              ...saved,
+              blocks: [...saved.blocks, attachment].slice(0, 16),
+            }),
+          );
+        }
         if (mounted.current) {
           setBlocks((current) => [
             ...current,
@@ -122,7 +161,10 @@ export function Composer({
         setError(err instanceof Error ? err.message : "上传失败，请重试");
     } finally {
       uploadingRef.current = false;
-      if (mounted.current) setUploading("");
+      if (mounted.current) {
+        setUploading("");
+        setPausedCount(pendingUploads(draftKey).length);
+      }
     }
   };
   const submit = async () => {
@@ -148,7 +190,7 @@ export function Composer({
     try {
       await sendMessage(payload);
       try {
-        localStorage.removeItem(draftKey);
+        removeDraft(draftKey);
       } catch {
         /* optional */
       }
@@ -236,6 +278,25 @@ export function Composer({
           <span />
           {uploading}
         </div>
+      )}
+      {pausedCount > 0 && !uploading && (
+        <button
+          className="px-3 py-2 text-xs"
+          disabled={!connected || sending}
+          onClick={() => {
+            const items = pendingUploads(draftKey);
+            const parent = items[0]?.parentId;
+            if (parent !== undefined)
+              void attach(
+                items
+                  .filter((item) => item.parentId === parent)
+                  .map((item) => item.file),
+                parent,
+              );
+          }}
+        >
+          继续暂停的附件上传（{pausedCount}）
+        </button>
       )}
       {blocks.length > 0 && (
         <div className="composer-attachments">

@@ -64,6 +64,29 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+test("disabling an app pauses upload and reselecting resumes the same session", async () => {
+  const state = server(),
+    input = file(),
+    controller = new AbortController();
+  await assert.rejects(
+    uploadFile(
+      input,
+      "parent",
+      (progress) => {
+        if (progress.phase === "uploading") controller.abort();
+      },
+      4,
+      controller.signal,
+    ),
+    { name: "AbortError" },
+  );
+  assert.equal(state.sessions.size, 1);
+  assert.equal(state.calls.filter((call) => call.method === "PATCH").length, 0);
+  const result = await uploadFile(input, "parent", noProgress, 4);
+  assert.ok(result.entryId);
+  assert.equal(state.sessions.size, 1);
+});
+
 beforeEach(async () => {
   storage.clear();
   globalThis.fetch = async () => json({ ...profile, accessToken: "token1" });
@@ -742,7 +765,11 @@ test("downloads use bearer auth and the current API gateway with an encoded entr
   const prior = Object.getOwnPropertyDescriptor(globalThis, "document");
   Object.defineProperty(globalThis, "document", {
     configurable: true,
-    value: { createElement: () => anchor, body: { append() {} } },
+    value: {
+      createElement: () => anchor,
+      querySelector: () => null,
+      body: { append() {} },
+    },
   });
   t.after(() => {
     if (prior) Object.defineProperty(globalThis, "document", prior);

@@ -4,11 +4,15 @@
 >
 > 版本：v0.1
 >
-> 更新时间：2026-09-29
+> 更新时间：2026-10-08
 >
 > 状态口径：`已完成` 表示仓库中已有可验证实现；`部分完成` 表示已有原型或切片但未满足 PRD 的生产约束；`进行中` 表示当前迭代已开始；`待开始` 表示尚未进入实现；`阻塞` 表示存在需要决策或外部条件的明确阻碍。
 
-## 最新迭代：文件、聊天与 Dock
+## 最新迭代：应用管理修复与优化
+
+2026-10-08：已交付统一应用目录和四个官方应用的真实启停、HTTP 独立加载与角色控制、完整插件包检查/签名/候选运行/安装、不可变资源和完整回滚、SQLite schema 10 迁移、受控沙箱 SDK 及草稿/上传暂停恢复。Web 129 项单元测试、Web/SDK 类型检查和 Gateway/Runner Go 测试通过；开发代理与 Windows 便携 HTTPS 的合并浏览器验收各 21 项通过、5 项移动端不适用场景跳过，完整恢复已实测。Linux/Docker 实机结果仍待 CI/部署环境，不以配置或交叉编译代替验收。实现、证据和边界见 [应用管理迭代记录](iterations/application-management.md)，插件制作见 [插件开发手册](plugin-development.md)。
+
+## 上轮迭代：启动部署、文件、聊天与 Dock
 
 2026-10-08：新增统一开发启动器、版本化配置、持久化 home、内嵌网页与官方插件、HTTPS 初始化和续期、完整归档恢复、服务安装入口及发布/Compose CI。Windows 已实际验证 HTTPS、WebSocket、大于 8 MiB 分片、Range、后端重启和跨目录恢复，以及重复启动/编译失败/热重启；Linux 实机、Docker 和系统服务安装由 CI/部署环境继续验收。详细操作见 [启动部署手册](deployment.md)。本轮保留上一轮业务改动，不以新启动流程替代业务进度验收。
 
@@ -53,9 +57,9 @@
 | 聊天 | MVP 完成 | 频道/私聊成员过滤、线程、@成员和引用 blocks、编辑/删除审计版本、FTS5 关键词/成员/时间/游标查询、clientMsgId 跨重启幂等和 WS 订阅过滤均已接入真实 API | 离线草稿同步与更丰富引用渲染列为后续增强 |
 | 代码工作台 | MVP 完成 | 真实资源树、CodeMirror 6 懒加载高亮、2,000 行分页、草稿自动保存、baseVersion 乐观锁、结构化 diff/覆盖/另存为、5 MiB 以上只读和审计 | 大文件增量 diff/Worker 渲染列为后续增强 |
 | Runner 与任务 | MVP 完成（需 rootless engine） | Runner 注册/心跳、10 分钟单次注册令牌、独立 credential 签发/轮换/撤销/删除、Docker/Podman 非 root/无网络/只读根/配额隔离、任务状态轮询、日志游标、取消、声明 glob 产物采集并写入 Gateway CAS、以及 `RUNNER_UNAVAILABLE` 已实现；Gateway 未配置 Runner 时禁止伪造执行；Runner 不会自动向任意配置 URL 回传凭据，部署侧可按受控流程注册 | allowlist 网络策略和超大产物流式上传列为后续增强 |
-| 插件中心 | MVP 完成 | manifest/API/权限/入口校验、Ed25519 信任公钥、discovered/installed/enabled/disabled/uninstalled 生命周期、iframe sandbox + postMessage RPC、来源/CSP/大小/超时限制、上一版本真实 rollback；健康失败动作会自动回滚到上一版本并标记 degraded | 自动探针与发布签名流水线列为后续增强 |
+| 应用管理与插件 | 本轮闭环验收完成（Windows） | 统一应用目录、官方原生应用启停、HTTP/WS 同步、管理角色/修订号、完整 ZIP 包/Ed25519 签名/候选沙箱、schema 10 注册表、不可变资源与完整回滚、票据/CSP/MessageChannel 和只读 SDK；具体结果见本轮迭代记录 | Linux/Docker 实机由 CI/部署环境验收；首期不开放外部网络、资源写入或任务执行 |
 | RBAC、审计与安全 | MVP 完成 | `owner/admin/member/guest` 资源动作矩阵、设备/成员管理、资源 ACL/元数据/最近访问/单次分享、所有写操作审计哈希链、traceId、敏感字段脱敏和会话限流已覆盖 | 限流扩展到每个上传分片、完整安全/逃逸基线列为验收补充 |
-| 持久化与部署 | MVP 完成（Compose 需引擎） | SQLite v7 迁移（含规范化资源/频道/代码/Runner/job/plugin 表）、auth/mvp/FTS 状态、WS/上传/审计持久化、backup/restore、Docker Compose 数据卷/healthcheck/TLS/Runner profile 和部署手册已落地；Runner 生产依赖 rootless Docker/Podman | Windows/Linux 双平台实机矩阵与异地备份自动化列为后续增强 |
+| 持久化与部署 | Windows 核心实测；Compose 待引擎验收 | SQLite schema 10（保留历史规范化表，新增独立 plugin_registry）、auth/mvp/FTS/WS/上传/审计持久化、完整插件资源备份/恢复、便携内嵌程序与 HTTPS；升级前自动备份和不兼容降级拒绝 | Linux/Docker 实机及系统服务安装由 CI/部署环境验收 |
 | 分层测试与可观测性 | MVP 完成（自动化基础） | Go 单测覆盖迁移/令牌/RBAC/FTS/冲突/Runner 不可用/插件签名/审计；前端 9 个单测、TypeScript、Vite、Playwright 桌面+Pixel 7 配置；Prometheus 指标、traceId 和慢客户端降级已实现 | CI 中 Playwright 实机和 100 连接性能门禁需接入专用 Runner |
 
 ## 3. 研发路线图

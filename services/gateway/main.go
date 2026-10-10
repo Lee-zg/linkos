@@ -531,7 +531,7 @@ func cors(next http.Handler) http.Handler {
 		w.Header().Set("X-Trace-ID", traceID)
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		allowedOrigins := strings.TrimSpace(os.Getenv("LINKOS_ALLOWED_ORIGINS"))
-		allowed := origin == "" || allowedOrigins == ""
+		allowed := origin == "" || allowedOrigins == "" || (origin == "null" && strings.HasPrefix(r.URL.Path, "/api/v1/plugin-views/") && (r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS"))
 		if !allowed {
 			for _, candidate := range strings.Split(allowedOrigins, ",") {
 				if strings.TrimSpace(candidate) == origin {
