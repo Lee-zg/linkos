@@ -13,7 +13,7 @@ describe("computeMenuPosition", () => {
     assert.deepEqual(computeMenuPosition({ x: -10, y: -20 }, { width: 100, height: 80 }, viewport), { x: 0, y: 0 });
   });
 
-  it("keeps readonly CodeMirror descendants native", () => {
+  it("recognizes readonly CodeMirror descendants as editors for file shortcut safety", () => {
     const element = { tagName: "SPAN", closest: (selector: string) => selector.includes(".cm-editor") ? {} : null } as unknown as HTMLElement;
     assert.equal(isEditableElement(element), true);
   });

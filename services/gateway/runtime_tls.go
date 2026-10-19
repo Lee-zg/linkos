@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func createLANCertificates(home, host string) error {
+func createLANCertificates(home, host string, additionalHosts ...string) error {
 	if host == "" {
 		return fmt.Errorf("--host requires a stable LAN IP or DNS name")
 	}
@@ -80,6 +80,13 @@ func createLANCertificates(home, host string) error {
 	}
 	leaf.DNSNames = append(leaf.DNSNames, "localhost")
 	leaf.IPAddresses = append(leaf.IPAddresses, net.ParseIP("127.0.0.1"), net.ParseIP("::1"))
+	for _, additional := range additionalHosts {
+		ip := net.ParseIP(additional)
+		if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
+			return fmt.Errorf("invalid additional certificate IP %q", additional)
+		}
+		leaf.IPAddresses = append(leaf.IPAddresses, ip)
+	}
 	der, err := x509.CreateCertificate(rand.Reader, leaf, ca, &leafKey.PublicKey, key)
 	if err != nil {
 		return err

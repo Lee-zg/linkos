@@ -18,20 +18,20 @@
 - Node.js 24 或更新的稳定版本（推荐 24 LTS，已验证 26.4.0）与 pnpm 9.15.5
 - Go 1.25 系列（兼容 Go 1.26）
 
-### 一次准备，一个命令启动
+### 一键开发与全局 CLI
 
 ```bash
-pnpm run setup:dev
 pnpm dev
 pnpm run doctor
 pnpm run dev:status
+pnpm linkos cli install
 ```
 
-启动器管理 Gateway 与 Vite，保留 HMR；先检查已有项目服务并复用，端口冲突时协调空闲端口。访问地址以终端输出为准。数据库、文件和日志保存在 `.local/linkos`，后端编译失败时保留旧实例。
+首次 `dev` 自动准备冻结锁文件依赖，后续复用准备结果和已运行的服务。项目设置集中在 [`linkos.config.json`](linkos.config.json)，支持 `linkos config set dev.port auto` 和 JSON Schema 补全。显式安装用户级 CLI 后可用 `linkos dev`、`linkos doctor`、`linkos dev logs --follow`、`linkos pack --target current`。
 
-需要自定义端口时执行 `pnpm dev --web-port 5180 --gateway-port 8790`（`--port` 也可指定 Web 端口），或设置 `LINKOS_WEB_PORT` / `LINKOS_GATEWAY_PORT` 环境变量。指定端口被占用时自动尝试后续空闲端口，代理使用实际 Gateway 地址；已有项目服务优先复用。
+Gateway 是唯一 HTTPS 入口，Vite 仅在回环地址提供 HMR。端口自动沿用上次浏览器入口，或尝试 8443，再分配空闲端口；`pnpm dev --port 8443` 指定首选。自动识别实际局域网 IPv4，可用 `--lan-ip <本机IP>` 指定网卡，`--public-host <已有DNS名>` 固定访问主机名。实际地址以输出为准；客户端首次需信任 `.local/linkos/dev-web/tls/ca.crt`。数据库、文件和日志在 `.local/linkos`，编译失败保留旧后端；运行中的旧服务优先复用。
 
-生产 Compose、TLS、Runner engine、备份恢复和回滚流程见 [`docs/deployment.md`](docs/deployment.md)。
+完整命令、配置和迁移见 [CLI 手册](docs/cli.md)；生产 Compose、TLS、Runner、备份恢复和回滚见 [部署手册](docs/deployment.md)。
 
 ### 便携部署
 

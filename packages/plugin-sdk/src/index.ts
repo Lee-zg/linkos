@@ -4,7 +4,24 @@ import type {
   JobSpec,
   PluginManifest,
   ResourceRef,
+  PluginContextMenuGroup,
+  PluginContextMenuReference,
 } from "@linkos/protocol";
+
+export interface PluginMenuTrigger {
+  source: "pointer" | "keyboard";
+  target: HTMLElement;
+  anchor: { x: number; y: number };
+}
+
+type MenuRegistration = {
+  id: string;
+  getItems: (trigger: PluginMenuTrigger) => PluginContextMenuGroup[] | null;
+};
+type RegisteredCommand = {
+  run: () => void | Promise<void>;
+  ready: Promise<unknown>;
+};
 
 export interface LinkOSPluginContext {
   manifest: PluginManifest;
@@ -36,6 +53,10 @@ export interface LinkOSPluginContext {
     cancel(jobId: string): Promise<void>;
   };
   ui: {
+    registerContextMenu(
+      target: HTMLElement,
+      getItems: (trigger: PluginMenuTrigger) => PluginContextMenuGroup[] | null,
+    ): () => void;
     registerCommand(command: {
       id: string;
       title: string;
@@ -82,16 +103,181 @@ export function connectPlugin(
         timer: ReturnType<typeof setTimeout>;
       }
     >();
-    const commands = new Map<string, () => void | Promise<void>>();
+    const commands = new Map<string, RegisteredCommand>();
     const subscriptions = new Map<string, (event: DomainEvent) => void>();
+    const menus = new Map<HTMLElement, MenuRegistration>();
+    let menuSequence = 0;
+    let keyboardGesture = false;
+    let keyboardTimer: ReturnType<typeof setTimeout> | undefined;
+    let focusLeft = false;
+    let currentMenu: {
+      seq: number;
+      registration: MenuRegistration;
+      target: HTMLElement;
+      token?: string;
+      commands: Map<string, RegisteredCommand>;
+    } | null = null;
+
+    function cancelMenu() {
+      const old = currentMenu;
+      currentMenu = null;
+      if (old && port && !disposed) {
+        // Cancellation is bounded, fire-and-forget control, not a business RPC slot.
+        port.postMessage({
+          type: "request",
+          id: crypto.randomUUID(),
+          method: "ui.contextMenu.cancel",
+          params: { seq: old.seq },
+        });
+      }
+    }
+    async function showMenu(
+      event: MouseEvent | KeyboardEvent,
+      source: "pointer" | "keyboard",
+    ) {
+      cancelMenu();
+      if (disposed || !port || ("isComposing" in event && event.isComposing))
+        return;
+      const sequence = ++menuSequence;
+      const path = event.composedPath();
+      const element = path.find(
+        (node): node is HTMLElement => node instanceof HTMLElement,
+      );
+      const registeredElement = path.find(
+        (node): node is HTMLElement =>
+          node instanceof HTMLElement && menus.has(node),
+      );
+      if (!element || !registeredElement) return;
+      const registration = menus.get(registeredElement)!;
+      const rect = element.getBoundingClientRect();
+      const anchor =
+        source === "pointer"
+          ? {
+              x: (event as MouseEvent).clientX,
+              y: (event as MouseEvent).clientY,
+            }
+          : { x: rect.left, y: rect.bottom };
+      try {
+        const groups = registration.getItems({
+          source,
+          target: element,
+          anchor,
+        });
+        if (!groups?.some((group) => group.items.length)) return;
+        const selectedCommands = new Map<string, RegisteredCommand>();
+        for (const group of groups)
+          for (const item of group.items) {
+            const command = commands.get(item.commandId);
+            if (!command) return;
+            selectedCommands.set(item.commandId, command);
+          }
+        const menu = {
+          seq: sequence,
+          registration,
+          target:
+            element.closest<HTMLElement>(
+              "button, input, textarea, select, a[href], [tabindex], [contenteditable]",
+            ) ?? element,
+          commands: selectedCommands,
+          token: undefined as string | undefined,
+        };
+        currentMenu = menu;
+        await Promise.all(
+          [...selectedCommands.values()].map((command) => command.ready),
+        );
+        if (
+          currentMenu !== menu ||
+          menus.get(registeredElement) !== registration ||
+          !element.isConnected ||
+          [...selectedCommands].some(
+            ([id, command]) => commands.get(id) !== command,
+          )
+        )
+          return;
+        const result = await rpc<{ token: string | null }>(
+          "ui.contextMenu.open",
+          { seq: menu.seq, registrationId: registration.id, anchor, groups },
+        );
+        if (currentMenu !== menu) return;
+        if (result.token) menu.token = result.token;
+        else currentMenu = null;
+      } catch {
+        if (currentMenu?.seq === sequence) cancelMenu();
+      }
+    }
+    function contextMenu(event: MouseEvent) {
+      event.preventDefault();
+      if (keyboardGesture) {
+        keyboardGesture = false;
+        return;
+      }
+      void showMenu(event, "pointer");
+    }
+    function menuKey(event: KeyboardEvent) {
+      if (event.isComposing) return;
+      if (event.key === "Escape" || event.key === "Tab") {
+        cancelMenu();
+        return;
+      }
+      if (
+        event.key !== "ContextMenu" &&
+        !(event.shiftKey && event.key === "F10")
+      )
+        return;
+      event.preventDefault();
+      if (event.isComposing || event.repeat) return;
+      keyboardGesture = true;
+      void showMenu(event, "keyboard");
+    }
+    function releaseMenuKey() {
+      clearTimeout(keyboardTimer);
+      keyboardTimer = setTimeout(() => {
+        keyboardGesture = false;
+      }, 0);
+    }
+    function pointerDown() {
+      keyboardGesture = false;
+      cancelMenu();
+    }
+    function frameBlur() {
+      focusLeft = true;
+    }
+    function frameFocus() {
+      if (focusLeft) cancelMenu();
+      focusLeft = false;
+    }
+    function takeMenu(reference: PluginContextMenuReference) {
+      const menu = currentMenu;
+      if (
+        !menu ||
+        menu.seq !== reference.seq ||
+        (menu.token && menu.token !== reference.token)
+      )
+        return null;
+      currentMenu = null;
+      return menu;
+    }
+    function restoreMenuTarget(target: HTMLElement) {
+      if (target.isConnected) target.focus({ preventScroll: true });
+    }
     const timeout = setTimeout(() => {
       dispose();
       reject(new Error("PLUGIN_HANDSHAKE_TIMEOUT"));
     }, 5000);
     function dispose() {
       if (disposed) return;
+      cancelMenu();
       disposed = true;
       clearTimeout(timeout);
+      clearTimeout(keyboardTimer);
+      document.removeEventListener("contextmenu", contextMenu, true);
+      document.removeEventListener("keydown", menuKey, true);
+      document.removeEventListener("keyup", releaseMenuKey, true);
+      document.removeEventListener("pointerdown", pointerDown, true);
+      document.removeEventListener("scroll", cancelMenu, true);
+      window.removeEventListener("blur", frameBlur);
+      window.removeEventListener("focus", frameFocus);
+      menus.clear();
       window.removeEventListener("message", handshake);
       port?.close();
       for (const request of requests.values()) {
@@ -176,11 +362,30 @@ export function connectPlugin(
             clearTimeout(request.timer);
             if (data.error) request.reject(new Error(String(data.error)));
             else request.resolve(data.result);
-          } else if (data?.type === "event")
+          } else if (data?.type === "event") {
             subscriptions.get(data.subscriptionId)?.(data.event);
-          else if (data?.type === "command") void commands.get(data.id)?.();
+          } else if (data?.type === "context-menu.closed") {
+            const menu = takeMenu(data);
+            if (menu && data.restoreFocus) restoreMenuTarget(menu.target);
+          } else if (data?.type === "command") {
+            const command = commands.get(data.id);
+            if (data.contextMenu) {
+              const menu = takeMenu(data.contextMenu);
+              if (!menu || !command || menu.commands.get(data.id) !== command)
+                return;
+              restoreMenuTarget(menu.target);
+            }
+            void command?.run();
+          }
         };
         port.start();
+        document.addEventListener("contextmenu", contextMenu, true);
+        document.addEventListener("keydown", menuKey, true);
+        document.addEventListener("keyup", releaseMenuKey, true);
+        document.addEventListener("pointerdown", pointerDown, true);
+        document.addEventListener("scroll", cancelMenu, true);
+        window.addEventListener("blur", frameBlur);
+        window.addEventListener("focus", frameFocus);
         const unsupported = () =>
           Promise.reject(new Error("PLUGIN_METHOD_UNSUPPORTED"));
         resolve({
@@ -235,14 +440,40 @@ export function connectPlugin(
             notify: (input) => {
               void rpc("ui.notify", input).catch(() => undefined);
             },
-            registerCommand: (command) => {
-              commands.set(command.id, command.run);
-              void rpc("ui.registerCommand", {
-                id: command.id,
-                title: command.title,
-              }).catch(() => commands.delete(command.id));
+            registerContextMenu: (target, getItems) => {
+              if (disposed) return () => undefined;
+              const registration = { id: crypto.randomUUID(), getItems };
+              const previous = menus.get(target);
+              if (previous && currentMenu?.registration === previous)
+                cancelMenu();
+              menus.set(target, registration);
               return () => {
+                if (menus.get(target) !== registration) return;
+                menus.delete(target);
+                if (currentMenu?.registration === registration) cancelMenu();
+              };
+            },
+            registerCommand: (command) => {
+              const registered: RegisteredCommand = {
+                run: command.run,
+                ready: rpc("ui.registerCommand", {
+                  id: command.id,
+                  title: command.title,
+                }),
+              };
+              if (currentMenu?.commands.has(command.id)) cancelMenu();
+              commands.set(command.id, registered);
+              void registered.ready.catch(() => {
+                if (commands.get(command.id) !== registered) return;
                 commands.delete(command.id);
+                if (currentMenu?.commands.get(command.id) === registered)
+                  cancelMenu();
+              });
+              return () => {
+                if (commands.get(command.id) !== registered) return;
+                commands.delete(command.id);
+                if (currentMenu?.commands.get(command.id) === registered)
+                  cancelMenu();
                 void rpc("ui.unregisterCommand", { id: command.id }).catch(
                   () => undefined,
                 );

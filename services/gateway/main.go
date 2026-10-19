@@ -446,6 +446,7 @@ func runGateway(ctx context.Context) error {
 	defer discovery.close()
 	mux := http.NewServeMux()
 	registerRuntimeRoutes(mux, backend)
+	registerDevelopmentRoutes(mux)
 	mux.HandleFunc("/api/v1/discovery", func(w http.ResponseWriter, _ *http.Request) {
 		workspaces := []interface{}{localDiscoveryBeacon("gateway")}
 		for _, peer := range discovery.list() {

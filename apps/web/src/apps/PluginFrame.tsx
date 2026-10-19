@@ -10,6 +10,14 @@ import {
 import { useWorkspace } from "../lib/workspace";
 import { useAppRegistry } from "../os/app-registry";
 import { useToast } from "../os/Toaster";
+import { useContextMenu } from "../os/ContextMenu";
+import { useContextMenuScope } from "../os/ContextMenuScope";
+import type { MenuToken } from "../os/context-menu-controller";
+import {
+  parsePluginMenu,
+  pluginMenuAnchor,
+  PluginMenuRequests,
+} from "../lib/plugin-context-menu";
 
 const TIMEOUT = 5000;
 export function PluginFrame({
@@ -29,6 +37,8 @@ export function PluginFrame({
     [attempt, setAttempt] = useState(0);
   const { lastEvent, connected } = useWorkspace();
   const { registerCommand } = useAppRegistry();
+  const { controller: menus } = useContextMenu();
+  const menuScope = useContextMenuScope();
   const toast = useToast(),
     readyCallback = useRef(onReady);
   const subscriptions = useRef(
@@ -42,13 +52,31 @@ export function PluginFrame({
     let active = 0,
       count = 0,
       since = Date.now();
+    type Command = { title: string; dispose: () => void };
     const controllers = new Set<AbortController>(),
-      commands = new Map<string, () => void>();
+      commands = new Map<string, Command>(),
+      registrations = new Map<string, object>(),
+      menuRequests = new PluginMenuRequests();
+    let menuToken: MenuToken | null = null;
+    const clearMenu = () => {
+      menuRequests.invalidate();
+      if (menuToken) menus.dismiss(menuToken);
+      menuToken = null;
+    };
+    const scopeActive = () =>
+      !!(
+        menuScope &&
+        menuScope.owner.kind === "app" &&
+        menus.isScopeActive(menuScope) &&
+        frame.current?.isConnected
+      );
     const fail = (message: string) => {
       if (!disposed) {
         window.clearTimeout(timer);
         window.clearInterval(handshake);
-        commands.forEach((dispose) => dispose());
+        clearMenu();
+        registrations.clear();
+        commands.forEach((command) => command.dispose());
         commands.clear();
         controllers.forEach((controller) => controller.abort());
         subscriptions.current.clear();
@@ -72,10 +100,31 @@ export function PluginFrame({
         typeof request.method !== "string"
       )
         return;
+      const connection = port.current;
+      if (!connection || event.target !== connection) return;
+      const connected = () => !disposed && port.current === connection;
       const respond = (value: unknown) => {
-        if (!disposed && rpcByteLength(value) <= 64 * 1024)
-          port.current?.postMessage(value);
+        if (connected() && rpcByteLength(value) <= 64 * 1024)
+          connection.postMessage(value);
       };
+      // Bounded cancellation must work even with every business RPC slot occupied.
+      if (request.method === "ui.contextMenu.cancel") {
+        const seq = request.params?.seq;
+        if (stageId || !Number.isSafeInteger(seq) || seq <= 0) {
+          respond({
+            type: "response",
+            id: request.id,
+            error: "无效的菜单取消请求",
+          });
+        } else {
+          if (menuRequests.cancel(seq) && menuToken) {
+            menus.dismiss(menuToken);
+            menuToken = null;
+          }
+          respond({ type: "response", id: request.id, result: null });
+        }
+        return;
+      }
       if (Date.now() - since > 1000) {
         since = Date.now();
         count = 0;
@@ -92,9 +141,28 @@ export function PluginFrame({
       const controller = new AbortController();
       controllers.add(controller);
       const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+      const params = request.params ?? {};
+      let registration: object | undefined;
       try {
         if (stageId) throw new Error("安装候选仅执行握手检查，不开放业务 RPC");
-        const params = request.params ?? {};
+        // Admission precedes asynchronous authorization so older replies cannot
+        // resurrect an unregistered command or replace a newer registration.
+        if (request.method === "ui.registerCommand") {
+          if (
+            !pluginHasPermission(plugin, "ui.command") ||
+            typeof params.id !== "string" ||
+            params.id.length > 100 ||
+            !plugin.manifest.contributes?.commands?.includes(params.id)
+          )
+            throw new Error("命令未包含在已批准声明中");
+          if (registrations.size >= 32 && !registrations.has(params.id))
+            throw new Error("命令数量超过限制");
+          registration = {};
+          registrations.set(params.id, registration);
+          commands.get(params.id)?.dispose();
+          commands.delete(params.id);
+          clearMenu();
+        }
         if (
           ["ui.notify", "ui.registerCommand", "events.subscribe"].includes(
             request.method,
@@ -115,6 +183,7 @@ export function PluginFrame({
             ))
           )
             throw new Error("插件权限或启用状态已改变");
+          if (!connected()) return;
         }
         let result: unknown;
         switch (request.method) {
@@ -129,31 +198,176 @@ export function PluginFrame({
             break;
           case "ui.registerCommand": {
             if (
-              !pluginHasPermission(plugin, "ui.command") ||
-              typeof params.id !== "string" ||
-              !plugin.manifest.contributes?.commands?.includes(params.id)
-            )
-              throw new Error("命令未包含在已批准声明中");
-            if (commands.size >= 32 && !commands.has(params.id))
-              throw new Error("命令数量超过限制");
-            commands.get(params.id)?.();
-            commands.set(
-              params.id,
-              registerCommand(plugin.id, {
-                id: params.id,
-                title: String(params.title ?? params.id).slice(0, 100),
-                run: () =>
-                  port.current?.postMessage({ type: "command", id: params.id }),
-              }),
-            );
+              !connected() ||
+              controller.signal.aborted ||
+              registrations.get(params.id) !== registration
+            ) {
+              result = null;
+              break;
+            }
+            const command: Command = {
+              title: String(params.title ?? params.id).slice(0, 100),
+              dispose: () => {},
+            };
+            command.dispose = registerCommand(plugin.id, {
+              id: params.id,
+              title: command.title,
+              run: async () => {
+                const allowed = await pluginRPC<boolean>(plugin, "auth.check", {
+                  permission: "ui.command",
+                }).catch(() => false);
+                if (
+                  allowed &&
+                  connected() &&
+                  commands.get(params.id) === command
+                )
+                  connection.postMessage({ type: "command", id: params.id });
+              },
+            });
+            commands.set(params.id, command);
             result = null;
             break;
           }
           case "ui.unregisterCommand":
-            commands.get(params.id)?.();
+            registrations.delete(params.id);
+            commands.get(params.id)?.dispose();
             commands.delete(params.id);
+            clearMenu();
             result = null;
             break;
+          case "ui.contextMenu.open": {
+            const element = frame.current;
+            if (!element) {
+              result = { token: null };
+              break;
+            }
+            const value = parsePluginMenu(params, commands, {
+              width: element.clientWidth,
+              height: element.clientHeight,
+            });
+            if (
+              !connected() ||
+              !scopeActive() ||
+              document.activeElement !== element ||
+              !pluginHasPermission(plugin, "ui.command")
+            ) {
+              result = { token: null };
+              break;
+            }
+            const pending = menuRequests.begin(value.seq);
+            if (!pending) {
+              result = { token: null };
+              break;
+            }
+            // Admission supersedes every pending gesture, even without our own
+            // visible token. begin already replaced our old ticket; clearMenu
+            // would invalidate this new one. Old onClose cancels only its seq.
+            menus.dismiss();
+            menuToken = null;
+            const epoch = menus.epoch;
+            const referenced = new Map(
+              value.groups.flatMap((group) =>
+                group.items.map(
+                  (item) =>
+                    [item.commandId, commands.get(item.commandId)!] as const,
+                ),
+              ),
+            );
+            const valid = () =>
+              connected() &&
+              menuRequests.isCurrent(pending) &&
+              scopeActive() &&
+              frame.current === element &&
+              [...referenced].every(
+                ([id, command]) => commands.get(id) === command,
+              );
+            const allowed = await pluginRPC<boolean>(
+              plugin,
+              "auth.check",
+              { permission: "ui.command" },
+              controller.signal,
+            );
+            if (
+              !allowed ||
+              controller.signal.aborted ||
+              !valid() ||
+              menus.epoch !== epoch ||
+              document.activeElement !== element
+            ) {
+              menuRequests.cancel(value.seq);
+              result = { token: null };
+              break;
+            }
+            const wireToken = crypto.randomUUID();
+            const reference = { seq: value.seq, token: wireToken };
+            const notifyClosed = (restoreFocus: boolean) => {
+              if (connected())
+                connection.postMessage({
+                  type: "context-menu.closed",
+                  ...reference,
+                  restoreFocus,
+                });
+            };
+            menuToken = menus.open(menuScope!, {
+              anchor: pluginMenuAnchor(
+                value.anchor,
+                element.getBoundingClientRect(),
+                element,
+              ),
+              target: null,
+              content: value.groups.map((group) => ({
+                id: group.id,
+                items: group.items.map((item) => ({
+                  id: item.commandId,
+                  label: referenced.get(item.commandId)!.title,
+                  disabled: item.disabled,
+                  restoreFocus: false,
+                  onClick: () => {
+                    const actionEpoch = menus.epoch;
+                    const auth = new AbortController();
+                    controllers.add(auth);
+                    const timeout = setTimeout(() => auth.abort(), TIMEOUT);
+                    void pluginRPC<boolean>(
+                      plugin,
+                      "auth.check",
+                      { permission: "ui.command" },
+                      auth.signal,
+                    )
+                      .then((allowed) => {
+                        if (
+                          allowed &&
+                          !auth.signal.aborted &&
+                          valid() &&
+                          menus.epoch === actionEpoch
+                        ) {
+                          connection.postMessage({
+                            type: "command",
+                            id: item.commandId,
+                            contextMenu: reference,
+                          });
+                          menuRequests.cancel(value.seq);
+                        } else notifyClosed(false);
+                      })
+                      .catch(() => notifyClosed(false))
+                      .finally(() => {
+                        clearTimeout(timeout);
+                        controllers.delete(auth);
+                      });
+                  },
+                })),
+              })),
+              onClose: (token, reason) => {
+                if (menuToken === token) menuToken = null;
+                if (reason !== "activate") {
+                  menuRequests.cancel(value.seq);
+                  notifyClosed(reason === "close");
+                }
+              },
+            });
+            if (!menuToken) menuRequests.cancel(value.seq);
+            result = { token: menuToken ? wireToken : null };
+            break;
+          }
           case "events.subscribe": {
             const type =
               typeof params.type === "string" ? params.type : "workspace.*";
@@ -192,6 +406,14 @@ export function PluginFrame({
           error: err instanceof Error ? err.message : "RPC 失败",
         });
       } finally {
+        // Failed/aborted admission releases only its own reservation, never a
+        // newer registration that is still awaiting authorization.
+        if (
+          registration &&
+          registrations.get(params.id) === registration &&
+          !commands.has(params.id)
+        )
+          registrations.delete(params.id);
         clearTimeout(timeout);
         controllers.delete(controller);
         active--;
@@ -284,6 +506,7 @@ export function PluginFrame({
     };
     void load();
     return () => {
+      clearMenu();
       disposed = true;
       window.clearTimeout(timer);
       window.clearInterval(handshake);
@@ -291,7 +514,8 @@ export function PluginFrame({
       port.current?.close();
       port.current = null;
       controllers.forEach((value) => value.abort());
-      commands.forEach((dispose) => dispose());
+      registrations.clear();
+      commands.forEach((command) => command.dispose());
       subscriptions.current.clear();
     };
   }, [
@@ -303,6 +527,8 @@ export function PluginFrame({
     attempt,
     registerCommand,
     toast,
+    menus,
+    menuScope,
   ]);
   useEffect(() => {
     if (!lastEvent || !ready || stageId) return;

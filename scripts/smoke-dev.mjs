@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { mkdtemp, mkdir, writeFile, readFile, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { sourceFixture } from "./smoke-support.mjs";
 import {
   delay,
   probe,
@@ -13,7 +14,11 @@ import {
   waitReady,
   stopGateway,
 } from "./dev-support.mjs";
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const sourceRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+const root = await sourceFixture(sourceRoot);
 await mkdir(path.join(root, ".local"), { recursive: true });
 const home = await mkdtemp(path.join(root, ".local", "dev-smoke-"));
 const port = await freePort(18887),
@@ -49,14 +54,14 @@ const blockedWebPort = await occupyPort(),
 const env = {
   ...process.env,
   LINKOS_DEV_HOME: home,
-  LINKOS_WEB_PORT: "1", // The CLI preference must override this environment value.
-  LINKOS_GATEWAY_PORT: String(blockedGatewayPort),
+  LINKOS_DEV_PORT: "1", // The CLI preference must override this environment value.
+  GOCACHE: process.env.GOCACHE ?? path.join(sourceRoot, ".local/go-cache"),
 };
 let output = "";
 function launcher() {
   const child = fork(
     path.join(root, "scripts/dev.mjs"),
-    ["dev", "--acceptance", "--web-port", String(blockedWebPort)],
+    ["dev", "--acceptance", "--port", String(blockedWebPort)],
     { cwd: root, env, silent: true },
   );
   for (const stream of [child.stdout, child.stderr])
@@ -90,13 +95,9 @@ try {
     blockedGatewayPort,
   );
   assert.ok(
-    output.includes(`Web: preferred port ${blockedWebPort} is occupied`),
+    output.includes(`Gateway: preferred port ${blockedWebPort} is occupied`),
   );
-  assert.ok(
-    output.includes(
-      `Gateway: preferred port ${blockedGatewayPort} is occupied`,
-    ),
-  );
+  assert.equal(registry.gatewayURL, registry.webURL);
   assert.equal(
     (await probe(registry.webURL + "/api/v1/healthz")).projectId,
     id,
@@ -182,18 +183,34 @@ try {
       const state = await readJSON(path.join(home, "dev.json"));
       return (
         state?.launcherPID === adopter.pid &&
-        (await probe(registry.webURL + "/__linkos/dev"))
+        (await probe(state.webURL + "/__linkos/dev"))
       );
     }, "adopter Web did not start");
     assert.equal(
       (await readJSON(path.join(home, "run.json"))).pid,
       standalone.pid,
     );
-    adopter.send({ type: "linkos.stop" });
-    assert.equal(
-      await new Promise((resolve) => adopter.once("exit", resolve)),
-      0,
-    );
+    const adopterExit = new Promise((resolve) => adopter.once("exit", resolve));
+    await new Promise((resolve, reject) => {
+      const stopCLI = spawn(
+        process.execPath,
+        [
+          path.join(root, "scripts/linkos.mjs"),
+          "dev",
+          "stop",
+          "--project",
+          root,
+          "--home",
+          home,
+        ],
+        { cwd: root, env, stdio: "inherit", windowsHide: true },
+      );
+      stopCLI.once("error", reject);
+      stopCLI.once("exit", (code) =>
+        code === 0 ? resolve() : reject(new Error("CLI stop failed")),
+      );
+    });
+    assert.equal(await adopterExit, 0);
     assert.equal(
       (await probe(registry.gatewayURL + "/api/v1/healthz")).status,
       "ok",

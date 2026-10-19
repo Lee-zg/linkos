@@ -9,7 +9,8 @@ import { Minus, Square, X, Maximize2, Minimize2 } from "lucide-react";
 import type { WindowState } from "./types";
 import { useAppRegistry } from "./app-registry";
 import { useWindowManager } from "./window-manager";
-import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
+import type { ContextMenuItem } from "./ContextMenu";
+import { ContextMenuScope } from "./ContextMenuScope";
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(
@@ -28,7 +29,6 @@ export function Window({ win }: { win: WindowState }) {
   const { getApp } = useAppRegistry();
   const { close, focus, minimize, toggleMaximize, move, resize } =
     useWindowManager();
-  const { open: openMenu } = useContextMenu();
   const frameRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<number>();
   const isMobile = useIsMobile();
@@ -107,18 +107,6 @@ export function Window({ win }: { win: WindowState }) {
       onClick: requestClose,
     },
   ];
-
-  const handleTitleBarContextMenu = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest("button")) return;
-    e.preventDefault();
-    e.stopPropagation();
-    openMenu(
-      e.clientX,
-      e.clientY,
-      titleBarMenu,
-      e.currentTarget as HTMLElement,
-    );
-  };
 
   const startDrag = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -228,27 +216,18 @@ export function Window({ win }: { win: WindowState }) {
       aria-label={win.title}
       onPointerDown={() => !closing && focus(win.id)}
     >
-      <div
+      <ContextMenuScope owner={{ kind: "shell", objectId: `window:${win.id}` }} active={!win.minimized && !closing}
+        getMenu={({ target }) => target.closest("button") ? null : titleBarMenu}>
+        {(ref) => <div
+        ref={ref}
         className="relative flex h-10 shrink-0 items-center border-b bg-muted/50 px-3"
         onPointerDown={startDrag}
         onDoubleClick={(e) => {
           if ((e.target as HTMLElement).closest("button")) return;
           if (!isMobile) toggleMaximize(win.id);
         }}
-        onContextMenu={handleTitleBarContextMenu}
         tabIndex={0}
         aria-label={`${win.title} 标题栏`}
-        onKeyDown={(event) => {
-          if (
-            event.key !== "ContextMenu" &&
-            !(event.shiftKey && event.key === "F10")
-          )
-            return;
-          event.preventDefault();
-          event.stopPropagation();
-          const rect = event.currentTarget.getBoundingClientRect();
-          openMenu(rect.left, rect.bottom, titleBarMenu, event.currentTarget);
-        }}
       >
         <div className="group flex items-center gap-0.5" aria-label="窗口控制">
           <button
@@ -285,10 +264,13 @@ export function Window({ win }: { win: WindowState }) {
         <span className="pointer-events-none absolute left-1/2 max-w-[45%] -translate-x-1/2 truncate text-xs font-medium text-foreground/80">
           {win.title}
         </span>
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        {Content && <Content />}
-      </div>
+        </div>}
+      </ContextMenuScope>
+      <ContextMenuScope owner={{ kind: "app", appId: win.appId, windowId: win.id }} active={!win.minimized && !closing}>
+        {(ref) => <div ref={ref} data-context-menu-owner="app" className="min-h-0 flex-1 overflow-auto">
+          {Content && <Content />}
+        </div>}
+      </ContextMenuScope>
       {!fullscreen && (
         <div
           className="absolute right-0 bottom-0 h-4 w-4 cursor-nwse-resize"

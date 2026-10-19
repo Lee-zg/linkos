@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LinkOS project configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Node executable; relative paths resolve beside this file."
+        },
+        "go": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Go executable; relative paths resolve beside this file."
+        },
+        "pnpmVersion": { "const": "9.15.5" }
+      }
+    },
+    "dev": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "home": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Persistent development workspace."
+        },
+        "host": {
+          "type": "string",
+          "description": "auto, localhost, 0.0.0.0, or an assigned local IPv4."
+        },
+        "port": {
+          "$ref": "#/$defs/port",
+          "description": "auto retains the previous entry, tries 8443, then allocates a free port."
+        },
+        "lanIP": {
+          "type": "string",
+          "description": "auto or the preferred assigned IPv4, including a manually selected VPN interface."
+        },
+        "publicHost": {
+          "type": "string",
+          "description": "auto or a client-resolvable DNS name/local IPv4; does not create DNS records."
+        },
+        "https": {
+          "type": "boolean",
+          "description": "HTTPS is required for LAN; HTTP is allowed only on loopback."
+        },
+        "vitePort": {
+          "$ref": "#/$defs/port",
+          "description": "Internal loopback Vite port."
+        }
+      }
+    },
+    "pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outDir": { "type": "string", "minLength": 1 },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["windows/amd64", "linux/amd64", "linux/arm64", "current"]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "port": {
+      "oneOf": [
+        { "enum": ["auto", "0"] },
+        { "type": "integer", "minimum": 0, "maximum": 65535 },
+        {
+          "type": "string",
+          "pattern": "^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
+        }
+      ]
+    }
+  }
+}

@@ -7,6 +7,9 @@ import path from "node:path";
 import {
   checkNodeVersion,
   developmentPorts,
+  developmentOptions,
+  developmentNetwork,
+  developmentURLs,
   freePort,
   launcherLock,
   belongsToProject,
@@ -46,12 +49,12 @@ test("occupied ports are skipped without stopping their owner", async () => {
 });
 test("development ports use CLI, environment and mode defaults in order", () => {
   assert.deepEqual(developmentPorts([], {}), {
-    webPort: 5173,
-    gatewayPort: 8787,
+    webPort: 0,
+    gatewayPort: 0,
   });
   assert.deepEqual(developmentPorts(["--acceptance"], {}), {
-    webPort: 15173,
-    gatewayPort: 18887,
+    webPort: 0,
+    gatewayPort: 0,
   });
   const environment = { LINKOS_WEB_PORT: "5180", LINKOS_GATEWAY_PORT: "8790" };
   assert.deepEqual(developmentPorts([], environment), {
@@ -77,7 +80,7 @@ test("development ports use CLI, environment and mode defaults in order", () => 
   );
 });
 test("invalid port settings fail before a service starts", () => {
-  for (const value of ["0", "-1", "65536", "1.5", "1e4", "", "auto"])
+  for (const value of ["-1", "65536", "1.5", "1e4", ""])
     assert.throws(
       () => developmentPorts([], { LINKOS_WEB_PORT: value }),
       /1 to 65535/,
@@ -86,15 +89,102 @@ test("invalid port settings fail before a service starts", () => {
     () => developmentPorts(["--gateway-port=65536"], {}),
     /Gateway port/,
   );
-  assert.throws(() => developmentPorts(["--web-port"], {}), /requires a port/);
+  assert.throws(() => developmentPorts(["--web-port"], {}), /requires a value/);
   assert.throws(
     () => developmentPorts(["--web-port", "--gateway-port", "8790"], {}),
-    /requires a port/,
+    /requires a value/,
   );
   assert.throws(
     () => developmentPorts(["--unknown=5180"], {}),
     /Unknown option/,
   );
+});
+
+test("auto ports are OS assigned, distinct and tested on the requested listener", async () => {
+  assert.deepEqual(developmentPorts(["--port=auto", "--gateway-port=0"], {}), {
+    webPort: 0,
+    gatewayPort: 0,
+  });
+  const gateway = await freePort(0);
+  const web = await freePort("auto", [gateway], "0.0.0.0");
+  assert.ok(gateway > 0 && gateway <= 65535);
+  assert.notEqual(web, gateway);
+  const server = createServer();
+  await new Promise((resolve) => server.listen(web, "127.0.0.1", resolve));
+  try {
+    assert.notEqual(await freePort(web, [], "0.0.0.0"), web);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+const networkFixture = {
+  "VMware Network Adapter VMnet8": [
+    { family: "IPv4", address: "192.168.196.1", internal: false },
+  ],
+  "CorpLink Wintun": [
+    { family: "IPv4", address: "10.8.8.15", internal: false },
+  ],
+  WLAN: [{ family: "IPv4", address: "10.160.9.108", internal: false }],
+  Ethernet: [{ family: "IPv4", address: "192.168.1.30", internal: false }],
+  Loopback: [{ family: "IPv4", address: "127.0.0.1", internal: true }],
+  disconnected: [{ family: "IPv4", address: "169.254.1.2", internal: false }],
+};
+test("LAN auto-detection avoids VPN/VM addresses and publishes all physical URLs", () => {
+  const network = developmentNetwork(
+    developmentOptions([], {}),
+    networkFixture,
+  );
+  assert.equal(network.host, "0.0.0.0");
+  assert.equal(network.https, true);
+  assert.deepEqual(network.addresses, ["192.168.1.30", "10.160.9.108"]);
+  assert.deepEqual(developmentURLs(network, 52000).lanURLs, [
+    "https://192.168.1.30:52000",
+    "https://10.160.9.108:52000",
+  ]);
+  assert.equal(
+    developmentURLs(network, 52000).webURL,
+    "https://127.0.0.1:52000",
+  );
+  assert.equal(
+    developmentNetwork(developmentOptions([], {}), {}).host,
+    "127.0.0.1",
+  );
+});
+test("LAN overrides must be assigned locally and acceptance defaults to loopback", () => {
+  const specified = developmentNetwork(
+    developmentOptions(["--lan-ip=10.8.8.15"], {}),
+    networkFixture,
+  );
+  assert.equal(specified.primary, "10.8.8.15");
+  const local = developmentNetwork(
+    developmentOptions(["--acceptance"], {}),
+    networkFixture,
+  );
+  assert.deepEqual(local.addresses, []);
+  assert.equal(local.host, "127.0.0.1");
+  assert.equal(local.https, false);
+  assert.equal(
+    developmentNetwork(
+      developmentOptions(["--host=localhost"], {}),
+      networkFixture,
+    ).host,
+    "127.0.0.1",
+  );
+  assert.equal(
+    developmentOptions(["--host=127.0.0.1"], { LINKOS_WEB_HOST: "0.0.0.0" })
+      .host,
+    "127.0.0.1",
+  );
+  for (const args of [
+    ["--lan-ip=192.168.1.99"],
+    ["--host=192.168.1.99"],
+    ["--host=example.com"],
+    ["--host=127.0.0.1", "--lan-ip=192.168.1.30"],
+  ])
+    assert.throws(() =>
+      developmentNetwork(developmentOptions(args, {}), networkFixture),
+    );
 });
 test("port selection excludes reserved ports and stays within the TCP range", async () => {
   const server = createServer();

@@ -43,7 +43,7 @@ export function AccessGate({
   const [passcode, setPasscode] = useState("");
   const [note, setNote] = useState("");
   const [inviteCode, setInviteCode] = useState("");
-  const [gatewayAddress, setGatewayAddress] = useState(() => getGatewayBase() || "http://127.0.0.1:8787");
+  const [gatewayAddress, setGatewayAddress] = useState(() => getGatewayBase() || window.location.origin);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pollTimer = useRef<number | undefined>(undefined);

@@ -16,6 +16,13 @@ const linkOSMDNSService = "_linkos._tcp.local"
 
 func localDiscoveryBeacon(source string) discoveryBeacon {
 	address := strings.TrimRight(strings.TrimSpace(os.Getenv("LINKOS_PUBLIC_URL")), "/")
+	// The development browser entry terminates TLS and proxies HTTP/WebSocket
+	// to a loopback-only Gateway. Advertise that reachable entry, not the target.
+	if os.Getenv("LINKOS_ENV") == "development" {
+		if public := strings.TrimRight(os.Getenv("LINKOS_DEV_PUBLIC_URL"), "/"); validDiscoveryAddress(public) {
+			address = public
+		}
+	}
 	tlsEnabled := strings.TrimSpace(os.Getenv("LINKOS_TLS_CERT_FILE")) != ""
 	if !validDiscoveryAddress(address) {
 		scheme := "http"

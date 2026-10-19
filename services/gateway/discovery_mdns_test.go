@@ -5,6 +5,24 @@ import (
 	"testing"
 )
 
+func TestDevelopmentDiscoveryUsesBrowserEntry(t *testing.T) {
+	t.Setenv("LINKOS_PUBLIC_URL", "http://127.0.0.1:59001")
+	t.Setenv("LINKOS_DEV_PUBLIC_URL", "https://192.168.1.20:59002")
+	t.Setenv("LINKOS_ENV", "development")
+	if beacon := localDiscoveryBeacon("test"); beacon.Address != "https://192.168.1.20:59002" || !beacon.TLS {
+		t.Fatal(beacon)
+	}
+	t.Setenv("LINKOS_ENV", "production")
+	if beacon := localDiscoveryBeacon("test"); beacon.Address != "http://127.0.0.1:59001" {
+		t.Fatal("development override affected production")
+	}
+	t.Setenv("LINKOS_ENV", "development")
+	t.Setenv("LINKOS_DEV_PUBLIC_URL", "file:///tmp/invalid")
+	if beacon := localDiscoveryBeacon("test"); beacon.Address != "http://127.0.0.1:59001" {
+		t.Fatal("invalid public origin accepted")
+	}
+}
+
 func TestMDNSAnnouncementRoundTrip(t *testing.T) {
 	beacon := discoveryBeacon{
 		ID:      "workspace-1",

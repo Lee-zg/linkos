@@ -57,7 +57,7 @@ func parseRuntimeArgs(args []string) (map[string]string, []string, error) {
 		}
 		key, value, has := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
 		switch key {
-		case "lan", "dev", "replace", "help":
+		case "lan", "dev", "replace", "help", "json", "follow":
 			if !has {
 				value = "true"
 			}
@@ -71,7 +71,7 @@ func parseRuntimeArgs(args []string) (map[string]string, []string, error) {
 			}
 		}
 		switch key {
-		case "home", "config", "listen", "public-url", "data-dir", "upload-dir", "plugin-dir", "web-dir", "tls-mode", "tls-cert-file", "tls-key-file", "allowed-origins", "runner-url", "runner-api-token", "admin-passcode", "project-id", "discovery-port", "host", "output", "lan", "dev", "replace", "help":
+		case "home", "config", "listen", "public-url", "data-dir", "upload-dir", "plugin-dir", "web-dir", "tls-mode", "tls-cert-file", "tls-key-file", "allowed-origins", "runner-url", "runner-api-token", "admin-passcode", "project-id", "discovery-port", "host", "output", "lan", "dev", "replace", "help", "dev-upstream", "json", "follow", "project", "project-config":
 		default:
 			return nil, nil, fmt.Errorf("unknown option --%s", key)
 		}
@@ -81,6 +81,9 @@ func parseRuntimeArgs(args []string) (map[string]string, []string, error) {
 }
 
 func runtimeCLI(args []string) error {
+	if handled, err := dispatchProjectCLI(args); handled {
+		return err
+	}
 	flags, positional, err := parseRuntimeArgs(args)
 	if err != nil {
 		return err
@@ -114,6 +117,24 @@ func runtimeCLI(args []string) error {
 		return err
 	}
 	activeHome = home
+	// Development Web has a separate CA and leaf certificate. Generating it does
+	// not lock or change a running Gateway's config, data, or production TLS.
+	if command == "tls" && len(positional) == 1 && positional[0] == "dev" {
+		hosts := strings.Split(flags["host"], ",")
+		for _, host := range hosts {
+			ip := net.ParseIP(host)
+			if ip != nil {
+				if ip.IsUnspecified() || ip.IsMulticast() {
+					return errors.New("tls dev --host requires assigned local IP addresses")
+				}
+				continue
+			}
+			if err := validateDevCertificateDNS(host); err != nil {
+				return err
+			}
+		}
+		return createLANCertificates(filepath.Join(home, "dev-web"), hosts[0], hosts[1:]...)
+	}
 	overrides := map[string]string{}
 	for key, value := range flags {
 		envKey := "LINKOS_" + strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
@@ -135,28 +156,6 @@ func runtimeCLI(args []string) error {
 		return runtimeHealthcheck(c)
 	case "serve":
 		return serveRuntime(home, c)
-	case "doctor":
-		checks := map[string]string{"config": "ok", "assets": "ok", "runner": "disabled"}
-		if err = checkAssets(); err != nil {
-			return err
-		}
-		if c.TLSMode == "direct" {
-			if err = checkTLS(c); err != nil {
-				return err
-			}
-			checks["TLS"] = "ok"
-		}
-		if c.RunnerURL != "" {
-			checks["runner"] = "configured; run Runner doctor on its Linux/WSL2 host"
-		}
-		lock, e := acquireDataLock(c.DataDir)
-		if e == nil {
-			lock.Close()
-			checks["workspace"] = "offline"
-		} else {
-			checks["workspace"] = "locked by running instance"
-		}
-		return json.NewEncoder(os.Stdout).Encode(checks)
 	case "status":
 		state, e := readRuntimeState(home)
 		if e != nil {
@@ -186,6 +185,11 @@ func runtimeCLI(args []string) error {
 		}
 		return errors.New("Gateway is still draining writes; wait before maintenance")
 	case "logs":
+		if flags["follow"] == "true" {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			return followRuntimeLog(ctx, filepath.Join(home, "logs", "gateway.log"), os.Stdout)
+		}
 		f, e := os.Open(filepath.Join(home, "logs", "gateway.log"))
 		if e != nil {
 			return e
@@ -392,7 +396,7 @@ func registerRuntimeRoutes(mux *http.ServeMux, backend persistBackend) {
 	mux.HandleFunc("/api/v1/healthz", func(w http.ResponseWriter, r *http.Request) {
 		result := map[string]interface{}{"status": "ok", "service": "gateway", "version": buildVersion, "commit": buildCommit, "instanceId": currentRuntime.InstanceID, "storage": "sqlite"}
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if isLoopbackHost(host) && activeConfig.Environment == "development" {
+		if isLocalDevelopmentPeer(host) && activeConfig.Environment == "development" {
 			result["projectId"] = activeConfig.ProjectID
 		}
 		writeJSON(w, 200, result)
@@ -420,7 +424,7 @@ func registerRuntimeRoutes(mux *http.ServeMux, backend persistBackend) {
 			writeJSON(w, 503, map[string]string{"status": "resources unavailable"})
 			return
 		}
-		writeJSON(w, 200, map[string]interface{}{"status": "ready", "version": buildVersion, "databaseSchema": len(sqliteMigrations), "capabilities": map[string]bool{"embeddedWeb": bundledAssets != nil, "runner": activeConfig.RunnerURL != "", "persistent": true}})
+		writeJSON(w, 200, map[string]interface{}{"status": "ready", "version": buildVersion, "databaseSchema": len(sqliteMigrations), "capabilities": map[string]bool{"embeddedWeb": bundledAssets != nil, "runner": activeConfig.RunnerURL != "", "persistent": true, "developmentWeb": activeConfig.DevUpstream != "" && devUpstreamReady()}})
 	})
 }
 

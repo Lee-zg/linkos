@@ -1,3 +1,27 @@
+import type { ReactNode } from "react";
+
+export interface ContextMenuItem {
+  id: string;
+  label: string;
+  icon?: ReactNode;
+  disabled?: boolean;
+  restoreFocus?: boolean;
+  onClick?: () => void;
+}
+export interface ContextMenuGroup {
+  id: string;
+  items: ContextMenuItem[];
+}
+export type ContextMenuContent = ContextMenuItem[] | ContextMenuGroup[];
+
+export function normalizeMenuContent(content: ContextMenuContent): ContextMenuGroup[] {
+  if (!content.length) return [];
+  const groups = "items" in content[0]
+    ? content as ContextMenuGroup[]
+    : [{ id: "items", items: content as ContextMenuItem[] }];
+  return groups.filter((group) => group.items.length > 0);
+}
+
 export interface MenuPosition {
   x: number;
   y: number;

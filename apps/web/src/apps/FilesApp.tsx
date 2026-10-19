@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -31,7 +32,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useToast } from "../os/Toaster";
-import { useContextMenu, type ContextMenuItem } from "../os/ContextMenu";
+import { useContextMenuTrigger, type ContextMenuItem } from "../os/ContextMenu";
 import { isEditableElement } from "../os/context-menu";
 import {
   downloadResource,
@@ -140,7 +141,6 @@ export function FilesApp() {
     () => pendingUploads(transferScope).length,
   );
   const toast = useToast();
-  const contextMenu = useContextMenu();
   const browser = useFileBrowser();
   const { connected } = browser;
   const [tab, setTab] = useState<Tab>("shared");
@@ -206,7 +206,7 @@ export function FilesApp() {
   const locationsRef = useRef<HTMLElement>(null);
   const locationsButtonRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -260,7 +260,7 @@ export function FilesApp() {
       : tabs.find((item) => item.key === tab)!.label;
   const closeModal = () => setModal({ type: "none" });
 
-  const execute = (command: Command, resource?: FileResource) => {
+  const execute = (command: Command, resource?: FileResource, selection = browser.selectedIds) => {
     if (command === "refresh") {
       void browser.refresh();
       return;
@@ -301,15 +301,15 @@ export function FilesApp() {
       if (canMutate(resource))
         void operation(
           "trash",
-          browser.selectedIds.has(resource.id)
-            ? [...browser.selectedIds]
+          selection.has(resource.id)
+            ? [...selection]
             : [resource.id],
         );
       return;
     }
     if (canMutate(resource)) setModal({ type: command, resource });
   };
-  const menuItems = (resource?: FileResource): ContextMenuItem[] => {
+  const menuItems = (resource?: FileResource, selection = browser.selectedIds): ContextMenuItem[] => {
     if (!resource)
       return [
         {
@@ -401,8 +401,8 @@ export function FilesApp() {
         disabled: !connected,
         onClick: () =>
           setClipboard(
-            browser.selectedIds.has(resource.id)
-              ? [...browser.selectedIds]
+            selection.has(resource.id)
+              ? [...selection]
               : [resource.id],
           ),
       },
@@ -430,8 +430,8 @@ export function FilesApp() {
         icon: <Move size={14} />,
         disabled: !writable,
         onClick: () =>
-          browser.selectedIds.has(resource.id) && browser.selectedIds.size > 1
-            ? setModal({ type: "batch-move", ids: [...browser.selectedIds] })
+          selection.has(resource.id) && selection.size > 1
+            ? setModal({ type: "batch-move", ids: [...selection] })
             : execute("move", resource),
       },
       {
@@ -439,7 +439,7 @@ export function FilesApp() {
         label: inTrash ? "永久删除" : "移到废纸篓",
         icon: <Trash2 size={14} />,
         disabled: !writable,
-        onClick: () => execute("delete", resource),
+        onClick: () => execute("delete", resource, selection),
       },
       {
         id: "info",
@@ -449,24 +449,30 @@ export function FilesApp() {
       },
     ];
   };
-  const openMenu = (
-    event: MouseEvent<HTMLElement>,
-    resource?: FileResource,
-  ) => {
-    if (isEditableElement(event.target as HTMLElement)) return;
+  const menuTrigger = useContextMenuTrigger(({ target }) => {
+    if (modal.type !== "none" || isEditableElement(target)) return null;
+    const row = target.closest<HTMLElement>("[data-resource-id]");
+    if (row) {
+      const resource = displayedItems.find((item) => item.id === row.dataset.resourceId);
+      if (!resource) return null;
+      // React selection updates are asynchronous; callbacks need this gesture's snapshot.
+      const selection = new Set(browser.selectedIds.has(resource.id) ? browser.selectedIds : [resource.id]);
+      if (!browser.selectedIds.has(resource.id)) browser.select(resource.id);
+      row.focus({ preventScroll: true });
+      return menuItems(resource, selection);
+    }
+    if (target.closest("[data-files-menu-button]") ||
+        (target.closest(".finder-content") && !target.closest("button, a, [role=button]"))) return menuItems();
+    return null;
+  });
+  const setRootRef = useCallback((element: HTMLDivElement | null) => {
+    rootRef.current = element;
+    menuTrigger.ref(element);
+  }, [menuTrigger.ref]);
+  const openMenu = (event: MouseEvent<HTMLElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    const target = event.currentTarget;
-    target.focus();
-    if (resource && !browser.selectedIds.has(resource.id))
-      browser.select(resource.id);
-    const rect = target.getBoundingClientRect();
-    contextMenu.open(
-      event.clientX || rect.left,
-      event.clientY || rect.bottom,
-      menuItems(resource),
-      target,
-    );
+    menuTrigger.open(event.currentTarget);
   };
   const handleKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
@@ -489,21 +495,6 @@ export function FilesApp() {
         item.id ===
         (element?.dataset.resourceId ?? [...browser.selectedIds][0]),
     );
-    if (
-      event.key === "ContextMenu" ||
-      (event.shiftKey && event.key === "F10")
-    ) {
-      event.preventDefault();
-      event.stopPropagation();
-      const rect = (element ?? target).getBoundingClientRect();
-      contextMenu.open(
-        rect.left,
-        rect.bottom,
-        menuItems(resource),
-        element ?? target,
-      );
-      return;
-    }
     if (target.closest("button, select") || !isListing) return;
     const modifier = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
@@ -796,7 +787,6 @@ export function FilesApp() {
           )
             execute("open", resource);
         }}
-        onContextMenu={(event) => openMenu(event, resource)}
       >
         <span
           className={`finder-file-icon ${resource.type === "folder" ? "finder-folder" : ""} grid shrink-0 place-items-center ${grid ? "h-14 w-14" : "h-8 w-8"}`}
@@ -838,7 +828,7 @@ export function FilesApp() {
           className={`${iconButton} ${grid ? "absolute right-1 top-1" : ""}`}
           aria-label={`更多操作 ${resource.name}`}
           onDoubleClick={(event) => event.stopPropagation()}
-          onClick={(event) => openMenu(event, resource)}
+          onClick={openMenu}
         >
           <MoreHorizontal size={16} />
         </button>
@@ -1012,7 +1002,7 @@ export function FilesApp() {
 
   return (
     <div
-      ref={rootRef}
+      ref={setRootRef}
       className="finder-app flex h-full min-w-0 flex-col overflow-hidden"
       onKeyDown={handleKey}
       aria-busy={busy}
@@ -1146,7 +1136,8 @@ export function FilesApp() {
         <button
           className={iconButton}
           aria-label="更多操作"
-          onClick={(event) => openMenu(event)}
+          data-files-menu-button=""
+          onClick={openMenu}
         >
           <MoreHorizontal size={15} />
         </button>
@@ -1264,7 +1255,6 @@ export function FilesApp() {
           className={`finder-content min-h-0 min-w-0 flex-1 overflow-auto ${dragging ? "finder-drop-target" : ""}`}
           tabIndex={0}
           aria-label="文件内容"
-          onContextMenu={(event) => openMenu(event)}
           onClick={(event) => {
             const target = event.target as HTMLElement;
             if (

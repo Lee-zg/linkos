@@ -541,6 +541,28 @@ export interface PluginReady {
   nonce:string;
 }
 
+export interface PluginContextMenuGroup {
+  id: string;
+  items: { commandId: string; disabled?: boolean }[];
+}
+
+export interface PluginContextMenuOpen {
+  seq: number;
+  registrationId: string;
+  anchor: { x: number; y: number };
+  groups: PluginContextMenuGroup[];
+}
+
+export interface PluginContextMenuReference {
+  seq: number;
+  token: string;
+}
+
+export interface PluginContextMenuClosed extends PluginContextMenuReference {
+  type: "context-menu.closed";
+  restoreFocus: boolean;
+}
+
 export interface CodeFile {
   id: string;
   projectId: string;

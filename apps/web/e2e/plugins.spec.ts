@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createPrivateKey } from "node:crypto";
 import { packPlugin, packageFiles } from "../../../scripts/plugin-package.mjs";
+import ts from "typescript";
 
 test.describe.configure({ mode: "serial" });
 async function signingKey() {
@@ -51,6 +52,256 @@ async function change(page: Page, id: string, action: string) {
   });
   expect(response.status()).toBe(200);
 }
+test("plugin context menus use the host base and old packages stay strictly silent", async ({
+  page,
+  isMobile,
+}) => {
+  test.skip(isMobile, "Desktop context-menu and focus contract");
+  test.setTimeout(90000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  await login(page);
+  const headers = await auth(page);
+  const sdkSource = await readFile(
+    "../../packages/plugin-sdk/src/index.ts",
+    "utf8",
+  );
+  const sdk = ts.transpileModule(sdkSource, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ES2022,
+    },
+  }).outputText;
+  expect(sdk).not.toMatch(/^import\s/m);
+  async function installMenu(name: string, legacy: boolean) {
+    const id = `fixture.menu-${crypto.randomUUID().slice(0, 8)}`;
+    const manifest = {
+      id,
+      name,
+      version: "1.0.0",
+      apiVersion: "1.0",
+      entry: { ui: "ui/index.html" },
+      permissions: legacy ? [] : ["ui.command"],
+      contributes: { commands: legacy ? [] : ["refresh"] },
+      network: { mode: "deny" },
+    };
+    const code = legacy
+      ? `addEventListener('message',e=>{const d=e.data;if(d.type==='linkos.host.init')parent.postMessage({type:'linkos.plugin.ready',nonce:d.nonce,pluginId:d.pluginId,version:d.version,protocol:'1.0'},'*')});document.body.dataset.ready='true';`
+      : `import {connectPlugin} from './linkos-sdk.js';globalThis.menuResponses=[];addEventListener('message',event=>{if(event.data.type==='linkos.host.connect')event.ports[0].addEventListener('message',message=>globalThis.menuResponses.push(message.data))});const sdk=await connectPlugin(${JSON.stringify(manifest)});let count=0;sdk.ui.registerCommand({id:'refresh',title:${JSON.stringify(`刷新 ${name}`)},run(){document.querySelector('#count').textContent=String(++count)}});const remove=sdk.ui.registerContextMenu(document.querySelector('#scope'),()=>[{id:'main',items:[{commandId:'refresh',disabled:globalThis.menuDisabled===true}]}]);document.querySelector('#remove').onclick=remove;document.body.dataset.ready='true';`;
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><div id="scope" tabindex="0">菜单区域</div><input aria-label="插件输入"><button id="remove">注销菜单</button><p id="count">0</p><p id="blank">无菜单区域</p><script type="module">${code}</script></body></html>`;
+    const files = new Map([
+      ["manifest.json", Buffer.from(JSON.stringify(manifest))],
+      ["ui/index.html", Buffer.from(html)],
+    ]);
+    if (!legacy) files.set("ui/linkos-sdk.js", Buffer.from(sdk));
+    const data = packageFiles(files, await signingKey());
+    let inspected!: Awaited<ReturnType<typeof page.request.post>>;
+    // Package inspection deliberately permits only two requests per second.
+    await expect
+      .poll(
+        async () => {
+          inspected = await page.request.post(
+            "/api/v1/plugin-packages/inspect",
+            {
+              headers: { ...headers, "content-type": "application/zip" },
+              data,
+            },
+          );
+          return inspected.status();
+        },
+        { intervals: [250, 500, 1000] },
+      )
+      .not.toBe(429);
+    expect(inspected.ok(), await inspected.text()).toBeTruthy();
+    const stage = await inspected.json();
+    const ticketResponse = await page.request.post(
+      `/api/v1/plugins/${id}/ticket`,
+      { headers, data: { stageId: stage.stageId } },
+    );
+    expect(ticketResponse.ok()).toBeTruthy();
+    const ticket = await ticketResponse.json();
+    expect((await page.request.get(ticket.src)).ok()).toBeTruthy();
+    const installed = await page.request.post(`/api/v1/plugins/${id}/install`, {
+      headers,
+      data: {
+        stageId: stage.stageId,
+        expectedRevision: stage.expectedRevision,
+        probeNonce: ticket.nonce,
+      },
+    });
+    expect(installed.ok(), await installed.text()).toBeTruthy();
+    await change(page, id, "enable");
+    const frame = page.frameLocator(`iframe[title="${name} 插件沙箱"]`);
+    return { id, frame, name };
+  }
+  const suffix = crypto.randomUUID().slice(0, 8);
+  const first = await installMenu(`菜单测试 A ${suffix}`, false);
+  const second = await installMenu(`菜单测试 B ${suffix}`, false);
+  const old = await installMenu(`旧插件静默 ${suffix}`, true);
+  // Restored pinned plugins must still have one physical menu scope per icon.
+  await page.reload();
+  for (const item of [first, second, old])
+    await expect(page.locator(`[data-dock-app="plugin:${item.id}"]`)).toHaveCount(1);
+  await open(page, first.name);
+  await expect(first.frame.locator('body[data-ready="true"]')).toBeVisible();
+  expect(
+    await first.frame.locator("body").evaluate(() => document.compatMode),
+  ).toBe("CSS1Compat");
+  await first.frame.locator("#scope").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: `刷新 ${first.name}`, exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("menu")).toHaveCount(1);
+  await page.screenshot({
+    path: test.info().outputPath("plugin-context-menu.png"),
+  });
+  await expect(
+    page.getByRole("menuitem", { name: "系统设置", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("menuitem", { name: `刷新 ${first.name}`, exact: true })
+    .click();
+  await expect(first.frame.locator("#count")).toHaveText("1");
+  await expect(first.frame.locator("#scope")).toBeFocused();
+  await first.frame.locator("#scope").press("Shift+F10");
+  await expect(
+    page.getByRole("menuitem", { name: `刷新 ${first.name}`, exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(first.frame.locator("#scope")).toBeFocused();
+  await first.frame.locator("body").evaluate(() => {
+    (globalThis as any).menuDisabled = true;
+  });
+  await first.frame.locator("#scope").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: `刷新 ${first.name}`, exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("menu")).toBeFocused();
+  await expect(first.frame.locator("#count")).toHaveText("1");
+  await page.keyboard.press("Escape");
+  await first.frame.locator("body").evaluate(() => {
+    (globalThis as any).menuDisabled = false;
+  });
+  // A's window can cover B's desktop icon; launch through the reachable Dock.
+  await page.locator(`[data-dock-app="plugin:${second.id}"]`).click();
+  await expect(second.frame.locator('body[data-ready="true"]')).toBeVisible();
+  await second.frame.locator("#scope").click({ button: "right" });
+  await page
+    .getByRole("menuitem", { name: `刷新 ${second.name}`, exact: true })
+    .click();
+  await expect(second.frame.locator("#count")).toHaveText("1");
+  await expect(first.frame.locator("#count")).toHaveText("1");
+
+  // Hold an already authorized HTTP response, then invalidate the gesture.
+  // Waiting for the corresponding null RPC response proves the late path ran.
+  for (const action of ["escape", "input", "shell-menu", "minimize"] as const) {
+    let release!: () => void;
+    let arrived!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const url = `**/api/v1/plugins/${second.id}/rpc`;
+    await page.route(url, async (route) => {
+      if (route.request().postDataJSON()?.method !== "auth.check")
+        return route.continue();
+      const response = await route.fetch();
+      arrived();
+      await hold;
+      await route.fulfill({ response });
+    });
+    const cancelled = () =>
+      second.frame
+        .locator("body")
+        .evaluate(
+          () =>
+            (globalThis as any).menuResponses.filter(
+              (message: any) =>
+                message.type === "response" && message.result?.token === null,
+            ).length as number,
+        );
+    const before = await cancelled();
+    try {
+      await second.frame.locator("#scope").click({ button: "right" });
+      await reached;
+      if (action === "escape")
+        await second.frame.locator("#scope").press("Escape");
+      if (action === "input") await second.frame.getByLabel("插件输入").click();
+      if (action === "shell-menu")
+        await page
+          .getByLabel(`${second.name} 标题栏`, { exact: true })
+          .click({ button: "right" });
+      if (action === "minimize")
+        await page
+          .getByRole("button", { name: `最小化 ${second.name}`, exact: true })
+          .click();
+      release();
+      await expect.poll(cancelled).toBe(before + 1);
+      await expect(
+        page.getByRole("menuitem", {
+          name: `刷新 ${second.name}`,
+          exact: true,
+        }),
+      ).toHaveCount(0);
+      if (action === "shell-menu") {
+        await expect(
+          page.getByRole("menuitem", { name: "最小化", exact: true }),
+        ).toBeVisible();
+        await page.keyboard.press("Escape");
+      } else await expect(page.getByRole("menu")).toHaveCount(0);
+    } finally {
+      release();
+      await page.unroute(url);
+    }
+    if (action === "minimize")
+      await page.locator(`[data-dock-app="plugin:${second.id}"]`).click();
+  }
+  await second.frame.getByRole("button", { name: "注销菜单" }).click();
+  await second.frame.locator("#scope").click({ button: "right" });
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await page
+    .getByRole("button", { name: `最小化 ${second.name}`, exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: `最小化 ${first.name}`, exact: true })
+    .click();
+  await open(page, old.name);
+  await expect(old.frame.locator('body[data-ready="true"]')).toBeVisible();
+  expect(
+    await old.frame.locator("body").evaluate(() => document.compatMode),
+  ).toBe("CSS1Compat");
+  for (const selector of ["#scope", "#blank", "input"]) {
+    const target = old.frame.locator(selector);
+    await target.click({ button: "right" });
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(
+      await target.evaluate((element) => {
+        const event = new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+        });
+        element.dispatchEvent(event);
+        return event.defaultPrevented;
+      }),
+    ).toBe(true);
+  }
+  await old.frame.getByLabel("插件输入").fill("仍可正常输入");
+  await old.frame.getByLabel("插件输入").press("Shift+F10");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  for (const item of [first, second, old]) {
+    await change(page, item.id, "disable");
+    await change(page, item.id, "uninstall");
+  }
+  expect(errors).toEqual([]);
+});
+
 test("official disable removes real windows and launchers; session drafts survive denied storage", async ({
   page,
   browser,
@@ -171,14 +422,29 @@ test("complete package installs through a sandbox probe, reads via SDK and rolls
   await manager.getByRole("button", { name: "打开应用" }).click();
   await expect(frame.getByText("VERSION TWO")).toBeVisible();
   let externalRequests = 0;
-  await page.evaluate(()=>{Object.assign(window,{frameViolations:[]});document.addEventListener("securitypolicyviolation",event=>{if(event.blockedURI.includes("example.invalid"))(window as unknown as {frameViolations:string[]}).frameViolations.push(event.effectiveDirective);});});
+  await page.evaluate(() => {
+    Object.assign(window, { frameViolations: [] });
+    document.addEventListener("securitypolicyviolation", (event) => {
+      if (event.blockedURI.includes("example.invalid"))
+        (
+          window as unknown as { frameViolations: string[] }
+        ).frameViolations.push(event.effectiveDirective);
+    });
+  });
   page.on("request", (request) => {
     if (request.url().includes("example.invalid")) externalRequests++;
   });
   await frame.getByRole("button", { name: "Test network" }).click();
   await expect(frame.getByText("NETWORK BLOCKED")).toBeVisible();
   await frame.getByRole("button", { name: "Test navigation" }).click();
-  await expect.poll(()=>page.evaluate(()=>(window as unknown as {frameViolations:string[]}).frameViolations)).toContain("frame-src");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { frameViolations: string[] }).frameViolations,
+      ),
+    )
+    .toContain("frame-src");
   expect(externalRequests).toBe(0);
   await page
     .getByRole("button", { name: "关闭 资源阅读器", exact: true })

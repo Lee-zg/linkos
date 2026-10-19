@@ -136,8 +136,12 @@ func (s *mvpStore) handlePluginView(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Type", guessContentType(name))
+	contentType := guessContentType(name)
+	w.Header().Set("Content-Type", contentType)
 	if r.Method == "GET" {
+		if strings.HasPrefix(contentType, "text/html") {
+			data = injectPluginContextMenuGuard(data)
+		}
 		w.Write(data)
 	}
 }

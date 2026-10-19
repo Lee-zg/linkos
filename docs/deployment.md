@@ -2,40 +2,22 @@
 
 核心部署是一台机器、一个工作区、一个 Gateway 写入实例。网页和官方插件随 Go 程序内嵌发布；文件与聊天不依赖 Runner。生产机器无需安装 Node、pnpm 或 Go。
 
-## 开发
-
-准备 Node 24 或更新的稳定版本（推荐 24 LTS，已验证 26.4.0）、pnpm 9.15.5、Go 1.25 系列（本机也允许兼容的 Go 1.26）。启动器按最低版本检查，不会拒绝较新的稳定版本；不满足要求时会显示实际 Node 版本和可执行文件路径。在仓库根目录运行：
+## 开发与统一 CLI
 
 ```sh
-pnpm run setup:dev
 pnpm dev
-pnpm run doctor
-pnpm run dev:status
+pnpm doctor
+pnpm dev:status
+pnpm linkos cli install
 ```
 
-`setup:dev` 按锁文件安装依赖、下载 Go 模块、构建 Gateway、初始化 `.local/linkos/linkos.json`。`dev` 不安装依赖：先检查项目身份与实例锁，复用服务，协调 Web 5173 / Gateway 8787 附近的空闲端口。实际地址以输出和 `.local/linkos/dev.json` 为准；Vite 使用 strictPort 和实际 Gateway 代理地址。
+`dev` 自动准备冻结锁文件依赖，后续复用准备结果和已运行的同项目服务。项目设置集中在 `linkos.config.json`，支持参数、环境变量覆盖和 JSON Schema 校验；管理员口令、数据库和私钥保存在工作区中。
 
-端口可由命令行或环境变量指定，优先级为命令行 → 环境变量 → 默认值。`--port` 是 `--web-port` 的别名，同时支持 `--web-port=5180` 写法：
+Gateway 是开发与发布共同的网页/API/WebSocket 入口；开发时代理回环 Vite，保留 HMR。端口按“上次浏览器入口 → 8443 → 系统空闲端口”协调，可用 `--port` 指定首选。自动识别实际局域网 IPv4；客户端信任 `home/dev-web/tls/ca.crt`，不自动更改系统信任或防火墙。
 
-```sh
-pnpm dev --web-port 5180 --gateway-port 8790
-```
+已有旧拓扑和内存服务保持复用，下次正常启动才迁移。前端通过 HMR 更新，后端编译成功后仅重启本次创建的持久化实例；编译失败保留旧服务，Ctrl+C 不关闭复用实例。独立验收使用 `linkos dev --acceptance` 或临时 `LINKOS_DEV_HOME`。
 
-PowerShell 环境变量写法：
-
-```powershell
-$env:LINKOS_WEB_PORT = "5180"
-$env:LINKOS_GATEWAY_PORT = "8790"
-pnpm dev
-```
-
-端口必须为 1–65535；被占用或被另一服务预留时，向后查找最多 100 个端口并输出实际选择，不终止占用进程。Gateway 的公开 URL、允许来源和 Vite 的 HTTP/WebSocket 代理随实际端口同步。已运行的同项目服务优先复用，再次执行不会为更换端口重启旧实例；端口参数在下次正常启动时生效。独立验收使用相同参数，默认端口仍为 15173 / 18887。
-
-前端由 Vite HMR 更新。后端仅重启本次启动器创建的持久化实例，先编译候选程序，失败保留旧服务。Ctrl+C 只停止本次创建的服务。旧 Gateway 的健康接口缺少项目标识时，会尝试核实监听进程的仓库路径；无法核实的占用不终止。复用旧内存实例会提示存储状态，其数据不会被自动转换、清空或重启。
-
-独立验收使用 `pnpm run setup:acceptance`、`pnpm run dev:acceptance`，数据在 `.local/acceptance`，优先使用 15173 / 18887。自动化测试可通过 `LINKOS_DEV_HOME` 指定独立目录，使用独立项目实例标识。
-
-日志在对应 home 的 `logs/`。开发管理员口令文件为 `ADMIN-PASSCODE.txt`。使用 Playwright 时，把启动器输出的 Web 地址传给 `LINKOS_E2E_BASE_URL`，不要猜测端口。
+全局 CLI 安装、配置字段、环境变量、端口迁移、诊断、日志和正式打包见 [CLI 手册](cli.md)。安装是显式用户级操作；已安装的 Go CLI 无需 Node/Go 即可执行部署命令和运行诊断。生产配置继续使用工作区 `linkos.json`，端口保持明确配置。
 
 ## 便携程序
 
@@ -159,6 +141,7 @@ linkos serve --home /srv/linkos-restored
 
 ```sh
 pnpm test:launcher
+pnpm test:dev-network
 node scripts/smoke-dev.mjs
 pnpm release
 node scripts/smoke-release.mjs /absolute/path/to/linkos

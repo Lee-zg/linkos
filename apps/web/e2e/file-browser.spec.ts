@@ -13,7 +13,7 @@ const test = base.extend<{}, { authState: AuthState }>({
     const loginButton = page.getByRole("button", { name: "登录进入" });
     await expect(loginButton).toBeEnabled();
     await loginButton.click({ force: true });
-    await expect(page.getByText("系统状态", { exact: true }), "Gateway login is required for the real authenticated contract fixture").toBeVisible();
+    await expect(page.locator(".dock-connection"), "Gateway login is required for the real authenticated contract fixture").toHaveAttribute("aria-label", "已连接工作区");
     const state = await context.storageState();
     await context.close();
     await use(state);
@@ -36,7 +36,7 @@ const listing = (items: ReturnType<typeof resource>[], extra = {}) => ({
 });
 async function openFiles(page: Page) {
   await page.goto("/");
-  await expect(page.getByText("系统状态", { exact: true })).toBeVisible();
+  await expect(page.locator(".dock-connection")).toHaveAttribute("aria-label", "已连接工作区");
   const icon = page.getByText("文件", { exact: true }).first();
   if ((page.viewportSize()?.width ?? 1024) < 768) await icon.click(); else await icon.dblclick();
   return page.getByRole("dialog", { name: "文件", exact: true });
@@ -123,6 +123,64 @@ test("keyboard rename is a portal modal with input exemption and focus restorati
   await dialog.getByRole("textbox", { name: "名称", exact: true }).press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(item).toBeFocused();
+});
+
+test("portal backgrounds and inputs cannot inherit the Files menu", async ({ page }) => {
+  await page.route("**/api/v1/resources?*", route => route.fulfill({ json: listing([resource("probe", "菜单文件", "file")]) }));
+  const files = await openFiles(page);
+  await files.getByRole("button", { name: "更多操作 菜单文件", exact: true }).click();
+  await page.getByRole("menuitem", { name: "重命名", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "重命名", exact: true });
+  for (const target of [dialog, dialog.getByRole("textbox")]) {
+    expect(await target.evaluate(el => el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })))).toBe(false);
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await target.press("Shift+F10");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+  }
+  await dialog.getByRole("textbox").fill("输入保留");
+  await dialog.getByRole("textbox").press("Delete");
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+});
+
+test("right click selection snapshots replace old selections and keyboard companions do not reopen", async ({ page }) => {
+  await page.route("**/api/v1/resources?*", route => route.fulfill({ json: listing([resource("old", "原选择", "file"), resource("new", "新选择", "file")]) }));
+  let operation: unknown;
+  await page.route("**/api/v1/file-operations", route => { operation = route.request().postDataJSON(); return route.fulfill({ json: { items: [] } }); });
+  const files = await openFiles(page);
+  const previous = files.locator('[data-resource-id="old"]');
+  const next = files.locator('[data-resource-id="new"]');
+  await previous.click();
+  await next.click({ button: "right" });
+  await expect(next).toHaveAttribute("aria-selected", "true");
+  await expect(previous).toHaveAttribute("aria-selected", "false");
+  await page.getByRole("menuitem", { name: "复制", exact: true }).click();
+  const content = files.getByLabel("文件内容", { exact: true });
+  await content.press("Shift+F10");
+  await page.keyboard.press("ArrowDown");
+  const focused = page.getByRole("menuitem", { name: "粘贴项目", exact: true });
+  await expect(focused).toBeFocused();
+  await content.dispatchEvent("contextmenu", { button: 0, clientX: 0, clientY: 0 });
+  await expect(focused).toBeFocused();
+  await focused.click();
+  await expect.poll(() => operation).toEqual({ action: "copy", ids: ["new"], parentId: "" });
+  await next.focus();
+  for (const key of ["F10", "ContextMenu"]) {
+    const composing = await next.evaluate((el, key) => {
+      let reachedTarget = false;
+      const listener = () => { reachedTarget = true; };
+      el.addEventListener("keydown", listener);
+      const allowed = el.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey: key === "F10", isComposing: true, bubbles: true, cancelable: true }));
+      el.removeEventListener("keydown", listener);
+      return { allowed, reachedTarget };
+    }, key);
+    expect(composing).toEqual({ allowed: true, reachedTarget: true });
+    await expect(page.getByRole("menu")).toHaveCount(0);
+  }
+  // IME keys pass through, but the browser's native context menu is still canceled separately.
+  expect(await next.evaluate(el => el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })))).toBe(false);
+  await expect(page.getByRole("menuitem", { name: "下载", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(next).toBeFocused();
 });
 
 test("recent is queried from server and legacy upload history is explicitly local", async ({ page }) => {

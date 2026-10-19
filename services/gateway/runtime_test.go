@@ -80,6 +80,47 @@ func TestTLSRenewKeepsTrustRoot(t *testing.T) {
 		t.Fatal("SAN not renewed")
 	}
 }
+func TestDevelopmentTLSCoversAdaptersWithoutChangingGateway(t *testing.T) {
+	home := t.TempDir()
+	config := []byte("existing Gateway config must stay untouched")
+	file := filepath.Join(home, "linkos.json")
+	if err := os.WriteFile(file, config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	priorHome := activeHome
+	defer func() { activeHome = priorHome }()
+	for _, hosts := range []string{"192.168.1.20,10.0.0.4", "192.168.1.21,10.0.0.4"} {
+		if err := runtimeCLI([]string{"tls", "dev", "--home", home, "--host", hosts}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(home, "dev-web", "tls", "server.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(raw)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"192.168.1.21", "10.0.0.4", "localhost", "127.0.0.1", "::1"} {
+		if err := leaf.VerifyHostname(address); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if leaf.VerifyHostname("192.168.1.20") == nil {
+		t.Fatal("stale adapter remained in renewed certificate")
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || string(after) != string(config) {
+		t.Fatal("Gateway config changed")
+	}
+	for _, hosts := range []string{"", "0.0.0.0", "224.0.0.1", "bad host.example"} {
+		if runtimeCLI([]string{"tls", "dev", "--home", home, "--host", hosts}) == nil {
+			t.Fatal("invalid development address accepted")
+		}
+	}
+}
 func TestEmbeddedSPAFallbackAndAssets(t *testing.T) {
 	prior := bundledAssets
 	defer func() { bundledAssets = prior }()

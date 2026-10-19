@@ -86,6 +86,9 @@ func readPluginAsset(id, name, signature string) ([]byte, error) {
 }
 
 func webHandler() http.Handler {
+	if activeConfig.DevUpstream != "" {
+		return developmentWebHandler()
+	}
 	var web fs.FS
 	if root := os.Getenv("LINKOS_WEB_DIR"); root != "" {
 		web = os.DirFS(root)

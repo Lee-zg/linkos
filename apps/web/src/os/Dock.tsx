@@ -4,7 +4,8 @@ import { useAppRegistry } from "./app-registry";
 import { AppIcon } from "./AppIcon";
 import { useWindowManager } from "./window-manager";
 import { useSession } from "../lib/session";
-import { useContextMenu, type ContextMenuItem } from "./ContextMenu";
+import type { ContextMenuItem } from "./ContextMenu";
+import { ContextMenuScope } from "./ContextMenuScope";
 import { requestFileLocation } from "../lib/file-intent";
 import { getGatewayBase } from "../lib/api";
 import type { DynamicAppId } from "./types";
@@ -13,7 +14,6 @@ import { apps as defaultApps } from "./apps";
 export function Dock({ connected }: { connected: boolean }) {
   const { windows, open, focus, close, minimize } = useWindowManager();
   const { profile, exit } = useSession();
-  const { open: openMenu } = useContextMenu();
   const { apps, commands, getApp } = useAppRegistry();
   const key = `linkos.dock:${JSON.stringify([getGatewayBase(), profile.workspaceId, profile.userId])}`;
   const [order, setOrder] = useState<string[]>(() => {
@@ -35,7 +35,7 @@ export function Dock({ connected }: { connected: boolean }) {
     const added = apps.filter((app) => !knownApps.current.has(app.id));
     added.forEach((app) => knownApps.current.add(app.id));
     if (added.length)
-      setOrder((current) => [...current, ...added.map((app) => app.id)]);
+      setOrder((current) => [...new Set([...current, ...added.map((app) => app.id)])]);
   }, [apps]);
   const [launching, setLaunching] = useState<string | null>(null);
   const surface = useRef<HTMLDivElement>(null);
@@ -209,8 +209,9 @@ export function Dock({ connected }: { connected: boolean }) {
         {ordered.map((app) => {
           const win = windows.find((item) => item.appId === app.id);
           return (
-            <button
-              key={app.id}
+            <ContextMenuScope key={app.id} owner={{ kind: "shell", objectId: `dock:${app.id}` }} getMenu={() => { reset(); return menu(app.id); }}>
+              {(ref) => <button
+              ref={ref}
               data-dock-app={app.id}
               className={`dock-slot ${launching === app.id ? "is-launching" : ""}`}
               aria-label={app.name}
@@ -247,31 +248,6 @@ export function Dock({ connected }: { connected: boolean }) {
                   open(app.id);
                 }
               }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                reset();
-                openMenu(
-                  event.clientX,
-                  event.clientY,
-                  menu(app.id),
-                  event.currentTarget,
-                );
-              }}
-              onKeyDown={(event) => {
-                if (
-                  event.key === "ContextMenu" ||
-                  (event.shiftKey && event.key === "F10")
-                ) {
-                  event.preventDefault();
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  openMenu(
-                    rect.left,
-                    rect.top,
-                    menu(app.id),
-                    event.currentTarget,
-                  );
-                }
-              }}
             >
               <span className="dock-visual">
                 <AppIcon app={app} size={44} />
@@ -281,7 +257,8 @@ export function Dock({ connected }: { connected: boolean }) {
                 </span>
               </span>
               <span className={`dock-running ${win ? "is-running" : ""}`} />
-            </button>
+              </button>}
+            </ContextMenuScope>
           );
         })}
         <span className="dock-divider" />

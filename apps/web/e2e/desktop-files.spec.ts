@@ -8,7 +8,7 @@ async function login(page: Page, name: string) {
   const button = page.getByRole("button", { name: "登录进入" });
   await expect(button).toBeEnabled();
   await button.click();
-  await expect(page.getByRole("status", { name: "已连接工作区" })).toBeVisible();
+  await expect(page.locator(".dock-connection")).toHaveAttribute("aria-label", "已连接工作区");
 }
 
 async function openFiles(page: Page) {
@@ -56,17 +56,153 @@ test("desktop object menus preserve focus and window state", async ({ page, isMo
   await page.keyboard.press("Escape");
   await expect(icon).toBeFocused();
   await icon.press("Shift+F10");
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(icon).toBeFocused();
+  await icon.press("Shift+F10");
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
   await expect(page.getByRole("dialog", { name: "文件", exact: true })).toBeVisible();
   const files = page.getByRole("dialog", { name: "文件", exact: true });
   await files.getByRole("button", { name: "图标视图" }).click();
-  await page.locator(".wallpaper").click({ button: "right", position: { x: 1200, y: 20 } });
+  const wallpaper = page.locator(".wallpaper");
+  const blank = await wallpaper.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    // Installed apps change icon positions; hit-test the actual background.
+    for (let y = rect.top + 8; y < Math.min(rect.bottom, innerHeight); y += 16) {
+      for (let x = rect.left + 8; x < Math.min(rect.right, innerWidth); x += 16) {
+        if (document.elementFromPoint(x, y) === element)
+          return { x: x - rect.left, y: y - rect.top };
+      }
+    }
+    throw new Error("No exposed desktop background to right-click");
+  });
+  await wallpaper.click({ button: "right", position: blank });
+  await expect(page.getByRole("menuitem", { name: "打开文件管理器" })).toBeVisible();
   await page.getByRole("menuitem", { name: "显示桌面" }).click();
   await expect(page.locator('[role="dialog"][aria-label="文件"]')).toHaveAttribute("aria-hidden", "true");
   await openFiles(page);
   await expect(files.getByRole("button", { name: "图标视图" })).toHaveAttribute("aria-pressed", "true");
   await expect(files).toHaveCount(1);
+});
+
+test("live gateway multi-selection survives right click and keyboard More copies every selected item", async ({ page, isMobile }) => {
+  test.skip(isMobile, "Desktop multi-selection and keyboard menu contract");
+  await login(page, "Files menu selection");
+  const auth = await headers(page);
+  const name = `000-menu-${crypto.randomUUID()}`;
+  const created = await page.request.post("/api/v1/resources", { headers: auth, data: { type: "folder", name, parentId: "" } });
+  expect(created.status()).toBe(201);
+  const root = await created.json();
+  try {
+    const children: { id: string; name: string }[] = [];
+    for (const childName of ["选择甲", "选择乙", "复制目标"]) {
+      const response = await page.request.post("/api/v1/resources", { headers: auth, data: { type: "folder", name: childName, parentId: root.id } });
+      expect(response.status()).toBe(201);
+      children.push(await response.json());
+    }
+    await openFiles(page);
+    const files = page.getByRole("dialog", { name: "文件", exact: true });
+    await files.getByRole("textbox", { name: "搜索文件" }).fill(name);
+    await files.locator(`[data-resource-id="${root.id}"]`).dblclick();
+    const [first, second, destination] = children;
+    const firstRow = files.locator(`[data-resource-id="${first.id}"]`);
+    const secondRow = files.locator(`[data-resource-id="${second.id}"]`);
+    await firstRow.click();
+    await secondRow.click({ modifiers: ["Control"] });
+    for (const row of [firstRow, secondRow]) await expect(row).toHaveAttribute("aria-selected", "true");
+    await firstRow.click({ button: "right" });
+    await expect(page.getByRole("menu")).toBeVisible();
+    for (const row of [firstRow, secondRow]) await expect(row).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Home");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitem", { name: "复制", exact: true })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(firstRow).toBeFocused();
+    await files.locator(`[data-resource-id="${destination.id}"]`).dblclick();
+    await expect(files.getByRole("navigation", { name: "文件路径" })).toContainText(destination.name);
+    const more = files.getByRole("button", { name: "更多操作", exact: true });
+    await more.focus();
+    await more.press("Enter");
+    await expect(page.getByRole("menuitem", { name: "粘贴项目", exact: true })).toBeEnabled();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("menuitem", { name: "粘贴项目", exact: true })).toBeFocused();
+    const copied = page.waitForResponse(response => new URL(response.url()).pathname === "/api/v1/file-operations" && response.request().method() === "POST");
+    await page.keyboard.press("Enter");
+    const response = await copied;
+    expect(response.ok()).toBe(true);
+    expect(response.request().postDataJSON()).toEqual({ action: "copy", ids: [first.id, second.id], parentId: destination.id });
+    for (const child of [first, second]) await expect(files.getByRole("row", { name: child.name, exact: true })).toBeVisible();
+    const listing = await page.request.get(`/api/v1/resources?scope=files&parentId=${destination.id}`, { headers: auth });
+    expect(listing.ok()).toBe(true);
+    const entries: { id: string; name: string }[] = (await listing.json()).items;
+    expect(entries.map(entry => entry.name).sort()).toEqual([first.name, second.name].sort());
+    expect(entries.every(entry => entry.id !== first.id && entry.id !== second.id)).toBe(true);
+    const objectMore = files.getByRole("button", { name: `更多操作 ${first.name}`, exact: true });
+    await objectMore.focus();
+    await objectMore.press("Space");
+    await expect(page.getByRole("menuitem", { name: "打开", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(objectMore).toBeFocused();
+    await objectMore.press("Shift+F10");
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(objectMore).toBeFocused();
+  } finally {
+    expect((await page.request.delete(`/api/v1/resources/${root.id}?recursive=true`, { headers: auth })).ok()).toBe(true);
+  }
+});
+
+test("global menus isolate window content, title buttons and native editor menus", async ({ page, isMobile }) => {
+  test.skip(isMobile, "Desktop context gestures");
+  await login(page, "Menu boundaries");
+  await page.getByRole("button", { name: "设置", exact: true }).last().click();
+  const settings = page.getByRole("dialog", { name: "设置", exact: true });
+  await expect(settings).toBeVisible();
+  // No application provider: neither a shell menu nor the browser menu is allowed.
+  const content = settings.locator("[data-context-menu-owner=app]");
+  expect(await content.evaluate(el => el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })))).toBe(false);
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  const title = settings.getByLabel("设置 标题栏", { exact: true });
+  await title.press("Shift+F10");
+  await expect(page.getByRole("menuitem", { name: "最小化", exact: true })).toBeVisible();
+  const menu = page.getByRole("menu");
+  await menu.click({ button: "right" });
+  await expect(menu).toHaveCount(1);
+  await expect(page.getByRole("menuitem", { name: "系统设置", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  const close = settings.getByRole("button", { name: "关闭 设置", exact: true });
+  await close.press("Shift+F10");
+  await expect(menu).toHaveCount(0);
+  await close.click({ button: "right" });
+  await expect(menu).toHaveCount(0);
+  // Physical descendants in an app without a provider stay silent, including readonly CodeMirror.
+  for (const html of ['<input aria-label="native probe">', '<div contenteditable="true" tabindex="0">editable</div>', '<div class="cm-editor" tabindex="0"><span>readonly</span></div>']) {
+    const prevented = await content.evaluate((el, markup) => {
+      const host = document.createElement("div");
+      host.innerHTML = markup;
+      el.append(host);
+      const target = host.firstElementChild as HTMLElement;
+      target.focus();
+      const pointer = !target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      const keyboard = !target.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true }));
+      host.remove();
+      return { pointer, keyboard };
+    }, html);
+    expect(prevented).toEqual({ pointer: true, keyboard: true });
+    await expect(menu).toHaveCount(0);
+  }
+  await openFiles(page);
+  const files = page.getByRole("dialog", { name: "文件", exact: true });
+  await files.getByLabel("文件内容", { exact: true }).press("Shift+F10");
+  await expect(page.getByRole("menuitem", { name: "新建文件夹", exact: true })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect(menu).toHaveCount(0);
 });
 
 test("socket bursts, repeated snapshots and reconnect refresh using one connection", async ({ page, context }) => {
@@ -112,7 +248,7 @@ test("socket bursts, repeated snapshots and reconnect refresh using one connecti
   await expect(page.getByRole("button", { name: "上传文件", exact: true })).toBeDisabled();
   const beforeReconnect = reads;
   await context.setOffline(false);
-  await expect(page.getByRole("status", { name: "已连接工作区" })).toBeVisible();
+  await expect(page.locator(".dock-connection")).toHaveAttribute("aria-label", "已连接工作区");
   await expect.poll(() => reads).toBeGreaterThan(beforeReconnect);
   expect(await page.evaluate(() => (window as unknown as { acceptanceSockets: WebSocket[] }).acceptanceSockets.filter((item) => item.readyState === WebSocket.OPEN).length)).toBe(1);
 });
@@ -136,12 +272,12 @@ test("real nested upload syncs to a member and a read-only guest", async ({ page
     await member.goto("/");
     await member.getByLabel("显示名").fill("Other member");
     await member.getByRole("button", { name: "登录进入" }).click();
-    await expect(member.getByRole("status", { name: "已连接工作区" })).toBeVisible({ timeout: 15000 });
+    await expect(member.locator(".dock-connection")).toHaveAttribute("aria-label", "已连接工作区", { timeout: 15000 });
     const guest = await guestContext.newPage();
     guest.on("pageerror", error => errors.push(error.message));
     await guest.goto("/");
     await guest.getByRole("button", { name: "以访客身份直接进入" }).click();
-    await expect(guest.getByRole("status", { name: "已连接工作区" })).toBeVisible({ timeout: 15000 });
+    await expect(guest.locator(".dock-connection")).toHaveAttribute("aria-label", "已连接工作区", { timeout: 15000 });
     await openFiles(page);
     await openFiles(member);
     await openFiles(guest);

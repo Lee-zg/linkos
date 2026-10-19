@@ -39,6 +39,7 @@ type runtimeConfig struct {
 	PluginTrustedKeys string `json:"pluginTrustedKeys,omitempty"`
 	DiscoveryPort     int    `json:"discoveryPort"`
 	ProjectID         string `json:"projectId,omitempty"`
+	DevUpstream       string `json:"devUpstream,omitempty"`
 }
 
 func defaultHome() string {
@@ -62,7 +63,7 @@ func defaultConfig(home string) runtimeConfig {
 }
 
 func configFields(c *runtimeConfig) map[string]*string {
-	return map[string]*string{"LINKOS_ENV": &c.Environment, "LINKOS_LISTEN": &c.Listen, "LINKOS_PUBLIC_URL": &c.PublicURL, "LINKOS_DATA_DIR": &c.DataDir, "LINKOS_UPLOAD_DIR": &c.UploadDir, "LINKOS_PLUGIN_DIR": &c.PluginDir, "LINKOS_WEB_DIR": &c.WebDir, "LINKOS_TLS_MODE": &c.TLSMode, "LINKOS_TLS_CERT_FILE": &c.TLSCertFile, "LINKOS_TLS_KEY_FILE": &c.TLSKeyFile, "LINKOS_ADMIN_PASSCODE": &c.AdminPasscode, "LINKOS_ALLOWED_ORIGINS": &c.AllowedOrigins, "LINKOS_RUNNER_URL": &c.RunnerURL, "LINKOS_RUNNER_API_TOKEN": &c.RunnerAPIToken, "LINKOS_PLUGIN_TRUSTED_KEYS": &c.PluginTrustedKeys, "LINKOS_PROJECT_ID": &c.ProjectID}
+	return map[string]*string{"LINKOS_DEV_UPSTREAM": &c.DevUpstream, "LINKOS_ENV": &c.Environment, "LINKOS_LISTEN": &c.Listen, "LINKOS_PUBLIC_URL": &c.PublicURL, "LINKOS_DATA_DIR": &c.DataDir, "LINKOS_UPLOAD_DIR": &c.UploadDir, "LINKOS_PLUGIN_DIR": &c.PluginDir, "LINKOS_WEB_DIR": &c.WebDir, "LINKOS_TLS_MODE": &c.TLSMode, "LINKOS_TLS_CERT_FILE": &c.TLSCertFile, "LINKOS_TLS_KEY_FILE": &c.TLSKeyFile, "LINKOS_ADMIN_PASSCODE": &c.AdminPasscode, "LINKOS_ALLOWED_ORIGINS": &c.AllowedOrigins, "LINKOS_RUNNER_URL": &c.RunnerURL, "LINKOS_RUNNER_API_TOKEN": &c.RunnerAPIToken, "LINKOS_PLUGIN_TRUSTED_KEYS": &c.PluginTrustedKeys, "LINKOS_PROJECT_ID": &c.ProjectID}
 }
 
 func readRuntimeConfig(home, file string, overrides map[string]string) (runtimeConfig, error) {
@@ -106,6 +107,9 @@ func readRuntimeConfig(home, file string, overrides map[string]string) (runtimeC
 }
 
 func (c runtimeConfig) validate() error {
+	if err := validateDevUpstream(c.Environment, c.DevUpstream); err != nil {
+		return err
+	}
 	if c.SchemaVersion != 1 {
 		return errors.New("unsupported linkos.json schemaVersion")
 	}

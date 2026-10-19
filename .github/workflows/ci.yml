@@ -117,13 +117,15 @@ jobs:
       - run: pnpm run setup:dev
       - run: pnpm test:launcher
       - run: node scripts/smoke-dev.mjs
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: apps/web
+      - run: pnpm test:dev-network
       - run: node scripts/release.mjs --version ci --target ${{ matrix.target }}
       - run: go test -tags release ./services/gateway/...
       - run: node scripts/smoke-release.mjs ${{ matrix.binary }}
         env:
           LINKOS_SLOW_SMOKE: "1"
-      - run: pnpm exec playwright install --with-deps chromium
-        working-directory: apps/web
+      - run: node scripts/smoke-cli.mjs ${{ matrix.binary }}
       - run: pnpm test:plugins
         env:
           LINKOS_PLUGIN_SMOKE_BINARY: ${{ matrix.binary }}
