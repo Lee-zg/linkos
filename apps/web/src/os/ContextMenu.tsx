@@ -74,12 +74,34 @@ function ContextMenuOverlay({ menu, controller }: { menu: MenuSnapshot; controll
       }}>
       {groups.map((group, groupIndex) => <div key={group.id}>
         {groupIndex > 0 && <div role="separator" className="my-1 border-t" />}
-        {group.items.map((item) => <button key={item.id} role="menuitem" type="button" tabIndex={-1}
-          disabled={item.disabled} aria-disabled={item.disabled || undefined}
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent focus:bg-accent disabled:opacity-40"
-          onClick={() => controller.activate(menu.token, items.indexOf(item))} onFocus={() => setFocusIndex(items.indexOf(item))}>
-          {item.icon}<span>{item.label}</span>
-        </button>)}
+        {group.items.map((item) => <div key={item.id}>
+          <button role="menuitem" type="button" tabIndex={-1}
+            disabled={item.disabled} aria-disabled={item.disabled || undefined}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm outline-none hover:bg-accent focus:bg-accent disabled:opacity-40"
+            onClick={() => controller.activate(menu.token, items.indexOf(item))} onFocus={() => setFocusIndex(items.indexOf(item))}>
+            {item.icon}<span>{item.label}</span>
+          </button>
+          {item.grid && (
+            <div className={`menu-grid menu-grid-${item.grid.layout.replace("x", "x")}`} role="group" aria-label={`${item.label} grid`}>
+              {item.grid.cells.map((cell) => (
+                <button
+                  key={cell.id}
+                  className="menu-grid-cell"
+                  role="menuitem"
+                  tabIndex={-1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Find the parent item's onClick and invoke with grid context
+                    item.onClick?.();
+                    controller.close(menu.token);
+                  }}
+                >
+                  {cell.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>)}
       </div>)}
     </div>
   );

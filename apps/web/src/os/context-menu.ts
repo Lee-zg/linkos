@@ -1,11 +1,23 @@
 import type { ReactNode } from "react";
 
+export interface ContextMenuGridCell {
+  id: string;
+  label: string;
+  placement: string;
+}
+
+export interface ContextMenuGrid {
+  layout: string;
+  cells: ContextMenuGridCell[];
+}
+
 export interface ContextMenuItem {
   id: string;
   label: string;
   icon?: ReactNode;
   disabled?: boolean;
   restoreFocus?: boolean;
+  grid?: ContextMenuGrid;
   onClick?: () => void;
 }
 export interface ContextMenuGroup {

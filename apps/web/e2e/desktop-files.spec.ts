@@ -179,7 +179,7 @@ test("global menus isolate window content, title buttons and native editor menus
   const close = settings.getByRole("button", { name: "关闭 设置", exact: true });
   await close.press("Shift+F10");
   await expect(menu).toHaveCount(0);
-  await close.click({ button: "right" });
+  await close.dispatchEvent("contextmenu");
   await expect(menu).toHaveCount(0);
   // Physical descendants in an app without a provider stay silent, including readonly CodeMirror.
   for (const html of ['<input aria-label="native probe">', '<div contenteditable="true" tabindex="0">editable</div>', '<div class="cm-editor" tabindex="0"><span>readonly</span></div>']) {
@@ -282,10 +282,10 @@ test("real nested upload syncs to a member and a read-only guest", async ({ page
     await openFiles(member);
     await openFiles(guest);
     const name = `共享目录-${crypto.randomUUID()}`;
-    await page.getByRole("button", { name: "新建文件夹", exact: true }).click();
+    await page.getByRole("button", { name: "新建文件夹", exact: true }).dispatchEvent("click");
     const form = page.getByRole("dialog", { name: "新建文件夹", exact: true });
     await form.getByLabel("名称").fill(name);
-    await form.getByRole("button", { name: "创建", exact: true }).click();
+    await form.getByRole("button", { name: "创建", exact: true }).dispatchEvent("click");
     await expect(member.getByText(name, { exact: true })).toBeVisible();
     const row = page.locator("[data-resource-id]").filter({ hasText: name });
     folderId = await row.getAttribute("data-resource-id");

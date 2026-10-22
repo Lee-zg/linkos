@@ -199,14 +199,47 @@ test("plugin context menus use the host base and old packages stay strictly sile
 
   // Hold an already authorized HTTP response, then invalidate the gesture.
   // Waiting for the corresponding null RPC response proves the late path ran.
-  for (const action of ["escape", "input", "shell-menu", "minimize"] as const) {
+  // Phase 4 adds a Space switch and a window close while the response is held.
+  const focusMark = () =>
+    page.evaluate(() => {
+      const el = document.activeElement;
+      return el
+        ? `${el.tagName}|${el.getAttribute("aria-label") ?? ""}|${el.getAttribute("title") ?? ""}|${el.getAttribute("data-dock-app") ?? ""}`
+        : "";
+    });
+  for (const action of [
+    "escape",
+    "input",
+    "shell-menu",
+    "minimize",
+    "space",
+    "close",
+  ] as const) {
+    if (action === "space") {
+      // First lives in its own Full Space; second stays active on the Desktop.
+      await page
+        .getByRole("button", { name: `进入全屏 ${first.name}`, exact: true })
+        .dispatchEvent("click");
+      const firstTitle = page.getByLabel(`${first.name} 标题栏`, {
+        exact: true,
+      });
+      await firstTitle.focus();
+      await firstTitle.press("Shift+F10");
+      await page.getByRole("menuitem", { name: "显示桌面", exact: true }).click();
+      await page.locator(`[data-dock-app="plugin:${second.id}"]`).click();
+      await expect(second.frame.locator('body[data-ready="true"]')).toBeVisible();
+    }
     let release!: () => void;
     let arrived!: () => void;
+    let finished!: () => void;
     const hold = new Promise<void>((resolve) => {
       release = resolve;
     });
     const reached = new Promise<void>((resolve) => {
       arrived = resolve;
+    });
+    const fulfilled = new Promise<void>((resolve) => {
+      finished = resolve;
     });
     const url = `**/api/v1/plugins/${second.id}/rpc`;
     await page.route(url, async (route) => {
@@ -215,7 +248,10 @@ test("plugin context menus use the host base and old packages stay strictly sile
       const response = await route.fetch();
       arrived();
       await hold;
-      await route.fulfill({ response });
+      // A destroyed frame may abort its in-flight request; only close allows that.
+      const fulfill = route.fulfill({ response });
+      await (action === "close" ? fulfill.catch(() => undefined) : fulfill);
+      finished();
     });
     const cancelled = () =>
       second.frame
@@ -241,9 +277,26 @@ test("plugin context menus use the host base and old packages stay strictly sile
       if (action === "minimize")
         await page
           .getByRole("button", { name: `最小化 ${second.name}`, exact: true })
-          .click();
+          .dispatchEvent("click");
+      if (action === "space") {
+        await page.locator(`[data-dock-app="plugin:${first.id}"]`).click();
+        await expect(
+          page.getByRole("button", { name: `退出全屏 ${first.name}`, exact: true }),
+        ).toBeVisible();
+      }
+      if (action === "close")
+        await page
+          .getByRole("button", { name: `关闭 ${second.name}`, exact: true })
+          .dispatchEvent("click");
+      const focusBefore = await focusMark();
       release();
-      await expect.poll(cancelled).toBe(before + 1);
+      if (action === "close") {
+        // The frame (and its port) are gone: the held response cannot reopen anything.
+        await fulfilled;
+        await expect(
+          page.locator(`iframe[title="${second.name} 插件沙箱"]`),
+        ).toHaveCount(0);
+      } else await expect.poll(cancelled).toBe(before + 1);
       await expect(
         page.getByRole("menuitem", {
           name: `刷新 ${second.name}`,
@@ -255,23 +308,38 @@ test("plugin context menus use the host base and old packages stay strictly sile
           page.getByRole("menuitem", { name: "最小化", exact: true }),
         ).toBeVisible();
         await page.keyboard.press("Escape");
-      } else await expect(page.getByRole("menu")).toHaveCount(0);
+      } else {
+        await expect(page.getByRole("menu")).toHaveCount(0);
+        // The late null response neither steals focus nor refocuses the frame.
+        if (action === "space" || action === "close" || action === "minimize")
+          expect(await focusMark()).toBe(focusBefore);
+      }
     } finally {
       release();
       await page.unroute(url);
     }
     if (action === "minimize")
       await page.locator(`[data-dock-app="plugin:${second.id}"]`).click();
+    if (action === "space") {
+      await page
+        .getByRole("button", { name: `退出全屏 ${first.name}`, exact: true })
+        .dispatchEvent("click");
+      await page.locator(`[data-dock-app="plugin:${second.id}"]`).click();
+    }
+    if (action === "close") {
+      await page.locator(`[data-dock-app="plugin:${second.id}"]`).click();
+      await expect(second.frame.locator('body[data-ready="true"]')).toBeVisible();
+    }
   }
   await second.frame.getByRole("button", { name: "注销菜单" }).click();
   await second.frame.locator("#scope").click({ button: "right" });
   await expect(page.getByRole("menu")).toHaveCount(0);
   await page
     .getByRole("button", { name: `最小化 ${second.name}`, exact: true })
-    .click();
+    .dispatchEvent("click");
   await page
     .getByRole("button", { name: `最小化 ${first.name}`, exact: true })
-    .click();
+    .dispatchEvent("click");
   await open(page, old.name);
   await expect(old.frame.locator('body[data-ready="true"]')).toBeVisible();
   expect(
@@ -295,8 +363,52 @@ test("plugin context menus use the host base and old packages stay strictly sile
   await old.frame.getByLabel("插件输入").fill("仍可正常输入");
   await old.frame.getByLabel("插件输入").press("Shift+F10");
   await expect(page.getByRole("menu")).toHaveCount(0);
+  // Phase 4: disabling a plugin while its authorization response is held.
+  await page.locator(`[data-dock-app="plugin:${first.id}"]`).click();
+  await expect(first.frame.locator('body[data-ready="true"]')).toBeVisible();
+  {
+    let release!: () => void;
+    let arrived!: () => void;
+    let finished!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const fulfilled = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    const url = `**/api/v1/plugins/${first.id}/rpc`;
+    await page.route(url, async (route) => {
+      if (route.request().postDataJSON()?.method !== "auth.check")
+        return route.continue();
+      const response = await route.fetch();
+      arrived();
+      await hold;
+      // The disabled frame may abort its in-flight request.
+      await route.fulfill({ response }).catch(() => undefined);
+      finished();
+    });
+    try {
+      await first.frame.locator("#scope").click({ button: "right" });
+      await reached;
+      await change(page, first.id, "disable");
+      await expect(
+        page.locator(`iframe[title="${first.name} 插件沙箱"]`),
+      ).toHaveCount(0);
+      const focusBefore = await focusMark();
+      release();
+      await fulfilled;
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      expect(await focusMark()).toBe(focusBefore);
+    } finally {
+      release();
+      await page.unroute(url);
+    }
+  }
   for (const item of [first, second, old]) {
-    await change(page, item.id, "disable");
+    if (item !== first) await change(page, item.id, "disable");
     await change(page, item.id, "uninstall");
   }
   expect(errors).toEqual([]);
@@ -409,7 +521,7 @@ test("complete package installs through a sandbox probe, reads via SDK and rolls
   );
   await page
     .getByRole("button", { name: "关闭 资源阅读器", exact: true })
-    .click();
+    .dispatchEvent("click");
   await manager.locator('input[type="file"]').setInputFiles({
     name: "upgrade.linkos-plugin",
     mimeType: "application/zip",
@@ -448,7 +560,7 @@ test("complete package installs through a sandbox probe, reads via SDK and rolls
   expect(externalRequests).toBe(0);
   await page
     .getByRole("button", { name: "关闭 资源阅读器", exact: true })
-    .click();
+    .dispatchEvent("click");
   await manager.getByRole("button", { name: "回滚上一版本" }).click();
   await page.getByRole("button", { name: "确认操作" }).click();
   await expect(

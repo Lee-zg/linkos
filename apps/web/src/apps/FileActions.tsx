@@ -3,57 +3,169 @@ import { createPortal } from "react-dom";
 import { AlertTriangle, X } from "lucide-react";
 import { formatFileSize, validateFileName } from "../lib/file-browser";
 import type { FileResource } from "../lib/api";
+import { useWindowSurface } from "../os/WindowSurface";
 import { useFileBrowser } from "./files/useFileBrowser";
+import {
+  captureSelection, modalActivation, modalKeyAction, restoreSelection, shouldReclaimFocus, shouldRestorePreviousFocus, shouldTrapModal,
+  type SelectionSnapshot,
+} from "./modal-focus";
 
 const buttonClass = "rounded-md border px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-40";
 const primaryClass = "rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background disabled:opacity-40";
 const errorText = (error: unknown) => error instanceof Error ? error.message : "操作失败";
 
+const focusableSelector = 'input:not(:disabled), textarea:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex="0"]';
+const focusableIn = (panel: HTMLElement) => [...panel.querySelectorAll<HTMLElement>(focusableSelector)];
+const initialTarget = (panel: HTMLElement) =>
+  panel.querySelector<HTMLElement>("[data-initial-focus]") ?? panel.querySelector<HTMLElement>("input, textarea") ?? focusableIn(panel)[0] ?? panel;
+
+type ModalMemory = { initialized: boolean; previous: HTMLElement | null; last: HTMLElement | null; selection: SelectionSnapshot | null };
+type Box = { x: number; y: number; w: number; h: number };
+
+/** Clip the owner mask to the owner's uncovered parts; clipped areas also pass hits through. */
+function ownerClipPath(bounds: Box, regions: Box[]): string | undefined {
+  if (regions.length === 1 && regions[0].x === bounds.x && regions[0].y === bounds.y && regions[0].w === bounds.w && regions[0].h === bounds.h) return undefined;
+  if (!regions.length) return "inset(50%)";
+  return `path("${regions.map(r => `M${r.x - bounds.x} ${r.y - bounds.y}h${r.w}v${r.h}h${-r.w}Z`).join("")}")`;
+}
+
+/**
+ * Inside a WindowSurface the modal lives in the owner's stable portal container, is
+ * bounded to the owner's app area and traps focus/keys only while that owner is visible
+ * and active. Its DOM (and the form state below it) is never unmounted by visibility.
+ * Without a surface it keeps the body fallback and never pulls focus from the page.
+ */
 export function Modal({ title, busy = false, onClose, children, alert = false }: {
   title: string; busy?: boolean; onClose: () => void; children: ReactNode; alert?: boolean;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const latest = useRef({ busy, onClose });
-  latest.current = { busy, onClose };
+  const surface = useWindowSurface();
+  const trap = shouldTrapModal(surface);
+  const container = surface ? surface.portalContainer : document.body;
+  const ownerScoped = !!surface;
+  const windowId = surface?.owner.windowId ?? null;
+  const [panel, setPanel] = useState<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  panelRef.current = panel;
+  const latest = useRef({ busy, onClose, trap });
+  latest.current = { busy, onClose, trap };
+  const memory = useRef<ModalMemory>({ initialized: false, previous: null, last: null, selection: null });
+  const pressTrapped = useRef(false);
+
+  // Remember which panel element owned focus and its selection, whatever the trap state.
   useLayoutEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const panel = ref.current!;
-    const focusable = () => [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), textarea:not(:disabled), button:not(:disabled), select:not(:disabled), [tabindex="0"]')];
-    const initial = panel.querySelector<HTMLElement>("[data-initial-focus]") ?? panel.querySelector<HTMLElement>("input, textarea") ?? focusable()[0] ?? panel;
-    initial.focus();
-    if (initial instanceof HTMLInputElement) initial.select();
-    const onFocus = (event: FocusEvent) => {
-      if (!panel.contains(event.target as Node)) (focusable()[0] ?? panel).focus();
+    if (!panel) return;
+    const remember = (element: EventTarget | null) => {
+      if (!(element instanceof HTMLElement) || !panel.contains(element) || element === panel) return;
+      memory.current.last = element;
+      memory.current.selection = captureSelection(element);
     };
+    const onFocusIn = (event: FocusEvent) => remember(event.target);
+    const onFocusOut = (event: FocusEvent) => remember(event.target);
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (!latest.current.busy) latest.current.onClose();
-      }
-      if (event.key === "Tab") {
-        const elements = focusable();
-        const first = elements[0] ?? panel;
-        const last = elements[elements.length - 1] ?? panel;
-        if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) { event.preventDefault(); last.focus(); }
-        else if (!event.shiftKey && (document.activeElement === last || document.activeElement === panel)) { event.preventDefault(); first.focus(); }
+      const active = document.activeElement;
+      const elements = focusableIn(panel);
+      const first = elements[0] ?? panel;
+      const last = elements[elements.length - 1] ?? panel;
+      const action = modalKeyAction(event, {
+        trap: latest.current.trap,
+        panelHasFocus: !!active && panel.contains(active),
+        busy: latest.current.busy,
+        atFirst: active === first || active === panel,
+        atLast: active === last || active === panel,
+      });
+      if (!action) return;
+      event.preventDefault();
+      if (action === "close" || action === "consume") event.stopPropagation();
+      if (action === "close") latest.current.onClose();
+      else if (action === "wrap-first") first.focus();
+      else if (action === "wrap-last") last.focus();
+    };
+    panel.addEventListener("focusin", onFocusIn);
+    panel.addEventListener("focusout", onFocusOut);
+    panel.addEventListener("keydown", onKey);
+    return () => {
+      panel.removeEventListener("focusin", onFocusIn);
+      panel.removeEventListener("focusout", onFocusOut);
+      panel.removeEventListener("keydown", onKey);
+    };
+  }, [panel]);
+
+  useLayoutEffect(() => {
+    if (!panel || !trap) return;
+    const state = memory.current;
+    const restoreTarget = () => {
+      const remembered = state.last;
+      if (remembered && remembered.isConnected && panel.contains(remembered) && !remembered.matches(":disabled")) return remembered;
+      return focusableIn(panel)[0] ?? panel;
+    };
+    if (modalActivation(trap, state.initialized) === "initial") {
+      state.initialized = true;
+      const active = document.activeElement;
+      state.previous = active instanceof HTMLElement && !panel.contains(active) ? active : null;
+      const initial = initialTarget(panel);
+      initial.focus();
+      if (initial instanceof HTMLInputElement) initial.select();
+    } else {
+      // The owner removes `inert` in its own (parent) layout effect, after this one.
+      queueMicrotask(() => {
+        if (!latest.current.trap || !panel.isConnected) return;
+        const active = document.activeElement;
+        if (active && panel.contains(active)) return;
+        const target = restoreTarget();
+        target.focus({ preventScroll: true });
+        if (target === state.last) restoreSelection(target, state.selection);
+      });
+    }
+    const onFocus = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const app = target.closest('[data-context-menu-owner="app"]');
+      const targetInOwnerApp = !!windowId && app?.closest("[data-window-id]")?.getAttribute("data-window-id") === windowId;
+      if (shouldReclaimFocus({ trap: latest.current.trap, ownerScoped, targetInPanel: panel.contains(target), targetInOwnerApp })) {
+        const back = restoreTarget();
+        back.focus({ preventScroll: true });
+        if (back === state.last) restoreSelection(back, state.selection);
       }
     };
     document.addEventListener("focusin", onFocus);
-    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("focusin", onFocus);
-      document.removeEventListener("keydown", onKey, true);
-      if (previous?.isConnected) previous.focus({ preventScroll: true });
+      // Leaving a Space / minimizing: keep where the user is, only remember the panel focus.
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== panel && panel.contains(active)) {
+        state.last = active;
+        state.selection = captureSelection(active);
+      }
     };
+  }, [panel, trap, ownerScoped, windowId]);
+
+  useLayoutEffect(() => () => {
+    const state = memory.current;
+    const current = panelRef.current;
+    const active = document.activeElement;
+    if (shouldRestorePreviousFocus({
+      trap: latest.current.trap && state.initialized,
+      activeInPanel: !!current && !!active && current.contains(active),
+      activeIsBody: !active || active === document.body,
+    }) && state.previous?.isConnected) state.previous.focus({ preventScroll: true });
   }, []);
 
+  if (!container) return null;
+  const bounds = surface?.ownerBounds;
+  const clipPath = bounds && surface ? ownerClipPath(bounds, surface.ownerRegions) : undefined;
   return createPortal(
-    <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/40 p-3"
-      onClick={event => { event.stopPropagation(); if (event.target === event.currentTarget && !busy) onClose(); }}
+    <div className={bounds ? "pointer-events-auto absolute flex items-center justify-center bg-black/40 p-3" : "fixed inset-0 z-[9998] flex items-center justify-center bg-black/40 p-3"}
+      style={bounds ? { left: bounds.x, top: bounds.y, width: bounds.w, height: bounds.h, clipPath } : undefined}
+      onPointerDown={event => { pressTrapped.current = event.target === event.currentTarget && latest.current.trap; }}
+      onClick={event => {
+        event.stopPropagation();
+        const pressed = pressTrapped.current;
+        pressTrapped.current = false;
+        if (event.target === event.currentTarget && pressed && latest.current.trap && !busy) onClose();
+      }}
       onContextMenu={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-      <div ref={ref} role={alert ? "alertdialog" : "dialog"} aria-label={title} aria-modal="true" aria-busy={busy} tabIndex={-1}
-        className="max-h-[calc(100dvh-24px)] w-80 max-w-full overflow-auto rounded-xl border bg-background p-4 shadow-2xl outline-none">
+      <div ref={setPanel} role={alert ? "alertdialog" : "dialog"} aria-label={title} aria-modal="true" aria-busy={busy} tabIndex={-1}
+        className={`${bounds ? "max-h-full" : "max-h-[calc(100dvh-24px)]"} w-80 max-w-full overflow-auto rounded-xl border bg-background p-4 shadow-2xl outline-none`}>
         <div className="mb-3 flex items-center justify-between gap-2">
           {alert && <AlertTriangle size={16} className="shrink-0 text-warning" />}
           <h3 className="min-w-0 flex-1 text-sm font-medium">{title}</h3>
@@ -61,7 +173,7 @@ export function Modal({ title, busy = false, onClose, children, alert = false }:
         </div>
         {children}
       </div>
-    </div>, document.body,
+    </div>, container,
   );
 }
 

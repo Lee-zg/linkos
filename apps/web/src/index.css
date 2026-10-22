@@ -2,6 +2,19 @@
 @import "./desktop-experience.css";
 
 :root {
+  /* Global shell layers. Window ranks are bounded by their deliberate parent. */
+  --layer-desktop: 0;
+  --layer-windows: 100;
+  --layer-owner-portal: 200;
+  --layer-chrome: 9000;
+  --layer-overview: 9200;
+  --layer-toast: 9500;
+  --layer-menu: 9999;
+  /* Safe-area policy belongs to the host, never to app/iframe styles. */
+  --desktop-safe-top: env(safe-area-inset-top, 0px);
+  --desktop-safe-right: env(safe-area-inset-right, 0px);
+  --desktop-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --desktop-safe-left: env(safe-area-inset-left, 0px);
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.269 0 0);
@@ -70,6 +83,10 @@
   body,
   #root {
     height: 100%;
+  }
+  #root {
+    min-height: 100vh;
+    height: 100dvh;
   }
   body {
     margin: 0;

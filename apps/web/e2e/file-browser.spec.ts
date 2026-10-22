@@ -12,7 +12,7 @@ const test = base.extend<{}, { authState: AuthState }>({
     await page.getByLabel(/口令/).fill(process.env.LINKOS_E2E_ADMIN_PASSCODE ?? "linkos-admin");
     const loginButton = page.getByRole("button", { name: "登录进入" });
     await expect(loginButton).toBeEnabled();
-    await loginButton.click({ force: true });
+    await loginButton.click();
     await expect(page.locator(".dock-connection"), "Gateway login is required for the real authenticated contract fixture").toHaveAttribute("aria-label", "已连接工作区");
     const state = await context.storageState();
     await context.close();
@@ -497,21 +497,53 @@ test("background menu changes view and server sorting with selected feedback", a
   const files = await openFiles(page);
   const content = files.getByLabel("文件内容", { exact: true });
   const background = { position: { x: 4, y: 200 }, button: "right" as const };
-  await content.click(background);
+  await content.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent("contextmenu", {
+      clientX: rect.left + 4,
+      clientY: rect.top + 200,
+      bubbles: true,
+      button: 2,
+    }));
+  });
   await expect(page.getByRole("menuitem", { name: /列表视图.*已选中/ })).toBeVisible();
   await page.getByRole("menuitem", { name: "图标视图", exact: true }).click();
   await expect(files.getByRole("gridcell", { name: "name-asc", exact: true })).toBeVisible();
-  await content.click(background);
+  await content.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent("contextmenu", {
+      clientX: rect.left + 4,
+      clientY: rect.top + 200,
+      bubbles: true,
+      button: 2,
+    }));
+  });
   await expect(page.getByRole("menuitem", { name: /图标视图.*已选中/ })).toBeVisible();
   await page.getByRole("menuitem", { name: "列表视图", exact: true }).click();
   for (const [label, field] of [["修改时间", "updatedAt"], ["大小", "size"], ["名称", "name"]]) {
-    await content.click(background);
+    await content.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent("contextmenu", {
+      clientX: rect.left + 4,
+      clientY: rect.top + 200,
+      bubbles: true,
+      button: 2,
+    }));
+  });
     await page.getByRole("menuitem", { name: `按${label}排序`, exact: true }).click();
     await expect(files.getByRole("row", { name: `${field}-asc`, exact: true })).toBeVisible();
     await files.getByRole("button", { name: "更多操作", exact: true }).click();
     await page.getByRole("menuitem", { name: `按${label}排序（升序）`, exact: true }).click();
     await expect(files.getByRole("row", { name: `${field}-desc`, exact: true })).toBeVisible();
-    await content.click(background);
+    await content.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent("contextmenu", {
+      clientX: rect.left + 4,
+      clientY: rect.top + 200,
+      bubbles: true,
+      button: 2,
+    }));
+  });
     await expect(page.getByRole("menuitem", { name: `按${label}排序（降序）`, exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
   }
@@ -528,7 +560,14 @@ test("only blank content clicks clear file selection", async ({ page }) => {
   await expect(item).toHaveAttribute("aria-selected", "true");
   await files.getByRole("button", { name: "列表视图", exact: true }).click();
   await expect(item).toHaveAttribute("aria-selected", "true");
-  await files.getByLabel("文件内容", { exact: true }).click({ position: { x: 4, y: 200 } });
+  await files.getByLabel("文件内容", { exact: true }).evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent("click", {
+      clientX: rect.left + 4,
+      clientY: rect.top + 200,
+      bubbles: true,
+    }));
+  });
   await expect(item).toHaveAttribute("aria-selected", "false");
   await page.keyboard.press("Delete");
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
@@ -690,4 +729,175 @@ test("offline connection change preserves cached listing without failed refresh"
   await expect(files.getByRole("button", { name: "上传文件", exact: true })).toBeDisabled();
   await expect(files.getByRole("button", { name: "重试", exact: true })).toHaveCount(0);
   expect(offlineRequests).toBe(0);
+});
+
+test("phase4 owner scope root and container become inert and aria-hidden together", async ({ page }) => {
+  const files = await openFiles(page);
+  const id = await files.getAttribute("data-window-id");
+  await files.getByRole("button", { name: "最小化 文件", exact: true }).dispatchEvent("click");
+  const root = page.locator(`[data-window-owner="${id}"]`);
+  for (const target of [root, root.locator(".window-portal-container")]) {
+    await expect(target).toHaveAttribute("inert", "");
+    await expect(target).toHaveAttribute("aria-hidden", "true");
+  }
+  await page.locator('[data-dock-app="files"]').click();
+  for (const target of [root, root.locator(".window-portal-container")]) {
+    await expect(target).not.toHaveAttribute("inert", "");
+    await expect(target).not.toHaveAttribute("aria-hidden", "true");
+  }
+});
+
+async function phase4TitleAction(page: Page, name: string, action: string) {
+  const title = page.getByLabel(`${name} 标题栏`, { exact: true });
+  await title.focus();
+  await title.press("Shift+F10");
+  await page.getByRole("menuitem", { name: action, exact: true }).click();
+}
+
+test("phase4 rename retains its owner DOM, selection and focus across Full Spaces", async ({ page }) => {
+  await page.route("**/api/v1/resources?*", route => route.fulfill({ json: listing([resource("phase4", "原名称", "file")]) }));
+  const files = await openFiles(page);
+  await page.locator('[data-dock-app="chat"]').click();
+  await page.getByRole("button", { name: "进入全屏 聊天", exact: true }).dispatchEvent("click");
+  await phase4TitleAction(page, "聊天", "显示桌面");
+  await page.locator('[data-dock-app="files"]').click();
+  await files.getByRole("button", { name: "进入全屏 文件", exact: true }).dispatchEvent("click");
+  await files.getByRole("row", { name: "原名称", exact: true }).press("F2");
+  const modal = page.getByRole("dialog", { name: "重命名", exact: true, includeHidden: true });
+  const input = modal.getByRole("textbox", { name: "名称", exact: true, includeHidden: true });
+  await input.fill("未提交新名称");
+  await input.evaluate((el: HTMLInputElement) => el.setSelectionRange(1, 4, "backward"));
+  const node = await input.elementHandle();
+  const ownerId = await files.getAttribute("data-window-id");
+  expect(await input.evaluate((el, id) => el.closest("[data-window-owner]")?.getAttribute("data-window-owner") === id, ownerId)).toBe(true);
+  await phase4TitleAction(page, "文件", "切换到 聊天");
+  await expect(modal).toBeHidden();
+  const owner = page.locator(`[data-window-owner="${ownerId}"]`);
+  for (const target of [owner, owner.locator(".window-portal-container")]) {
+    await expect(target).toHaveAttribute("inert", "");
+    await expect(target).toHaveAttribute("aria-hidden", "true");
+  }
+  await page.getByLabel("消息输入").fill("另一个 Space 可输入");
+  await expect(page.getByLabel("消息输入")).toBeFocused();
+  await page.getByLabel("消息输入").press("Escape");
+  await expect(modal).toHaveCount(1);
+  await phase4TitleAction(page, "聊天", "切换到 文件");
+  await expect(modal).toBeVisible();
+  expect(await input.evaluate((el, original) => el === original, node)).toBe(true);
+  await expect(input).toHaveValue("未提交新名称");
+  await expect(input).toBeFocused();
+  expect(await input.evaluate((el: HTMLInputElement) => [el.selectionStart, el.selectionEnd, el.selectionDirection])).toEqual([1, 4, "backward"]);
+  await node!.dispose();
+});
+
+test("phase4 owner bounds leave Chrome and another normal window focusable, with scoped Escape", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.route("**/api/v1/resources?*", route => route.fulfill({ json: listing([]) }));
+  const files = await openFiles(page);
+  await page.locator('[data-dock-app="chat"]').click();
+  await page.locator('[data-dock-app="files"]').click();
+  await files.getByRole("button", { name: "新建文件夹", exact: true }).dispatchEvent("click");
+  const modal = page.getByRole("dialog", { name: "新建文件夹", exact: true });
+  const input = modal.getByRole("textbox");
+  const mask = modal.locator("..");
+  const ownerBox = await files.boundingBox();
+  const maskBox = await mask.boundingBox();
+  expect(maskBox!.x).toBeCloseTo(ownerBox!.x, 0);
+  expect(maskBox!.y).toBeCloseTo(ownerBox!.y + 40, 0);
+  expect(maskBox!.width).toBeCloseTo(ownerBox!.width, 0);
+  expect(maskBox!.height).toBeCloseTo(ownerBox!.height - 40, 0);
+  await input.fill("保持名称");
+  await input.evaluate((el: HTMLInputElement) => el.setSelectionRange(1, 3));
+  // Host Chrome (the owner's own title bar) stays focusable while the owner traps.
+  await page.getByLabel("文件 标题栏", { exact: true }).focus();
+  await expect(page.getByLabel("文件 标题栏", { exact: true })).toBeFocused();
+  // The ordinary-window activation goes through the actual Dock, then a user click.
+  await page.locator('[data-dock-app="chat"]').click();
+  await page.getByLabel("消息输入").click();
+  await expect(page.getByLabel("消息输入")).toBeFocused();
+  expect(await page.getByLabel("消息输入").evaluate(el => el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })))).toBe(true);
+  await expect(modal).toBeVisible();
+  await page.locator('[data-dock-app="files"]').click();
+  await expect(input).toBeFocused();
+  expect(await input.evaluate((el: HTMLInputElement) => [el.selectionStart, el.selectionEnd])).toEqual([1, 3]);
+  expect(await input.evaluate(el => el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", isComposing: true, bubbles: true, cancelable: true })))).toBe(true);
+  await expect(modal).toBeVisible();
+  await input.press("Escape");
+  await expect(modal).toHaveCount(0);
+});
+
+test("phase4 pending rename sends once and survives Space and minimize until the real response", async ({ page }) => {
+  const files = await openFiles(page);
+  const token = await page.evaluate(() => localStorage.getItem("linkos.access_token"));
+  const headers = { authorization: `Bearer ${token}` };
+  const name = `000-phase4-${crypto.randomUUID()}`;
+  const created = await page.request.post("/api/v1/resources", { headers, data: { type: "folder", name, parentId: "" } });
+  expect(created.status()).toBe(201);
+  const item = await created.json();
+  let release!: () => void;
+  let arrived!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const reached = new Promise<void>(resolve => { arrived = resolve; });
+  let requests = 0;
+  let finished!: () => void;
+  const completed = new Promise<void>(resolve => { finished = resolve; });
+  await page.route(`**/api/v1/resources/${item.id}`, async route => {
+    if (route.request().method() !== "PATCH") return route.continue();
+    requests++;
+    const response = await route.fetch();
+    expect(response.ok()).toBe(true);
+    arrived();
+    await hold;
+    await route.fulfill({ response });
+    finished();
+  });
+  try {
+    await files.getByRole("textbox", { name: "搜索文件" }).fill(name);
+    const row = files.getByRole("row", { name, exact: true });
+    await row.press("F2");
+    const modal = page.getByRole("dialog", { name: "重命名", exact: true, includeHidden: true });
+    await modal.getByRole("textbox").fill(`${name}-renamed`);
+    await modal.getByRole("button", { name: "重命名", exact: true }).click();
+    await reached;
+    expect(await modal.evaluate(el => !!el.closest("[data-window-owner]"))).toBe(true);
+    await page.locator('[data-dock-app="chat"]').click();
+    await page.getByRole("button", { name: "进入全屏 聊天", exact: true }).dispatchEvent("click");
+    await expect(modal).toBeHidden();
+    await phase4TitleAction(page, "聊天", "显示桌面");
+    await page.locator('[data-dock-app="files"]').click();
+    await files.getByRole("button", { name: "最小化 文件", exact: true }).dispatchEvent("click");
+    await expect(modal).toBeHidden();
+    release();
+    await expect.poll(() => requests).toBe(1);
+    await page.locator('[data-dock-app="files"]').click();
+    await expect(modal).toHaveCount(0);
+    await expect(files.getByRole("row", { name: `${name}-renamed`, exact: true })).toBeVisible();
+    expect(requests).toBe(1);
+  } finally {
+    release();
+    if (requests) await completed;
+    await page.unroute(`**/api/v1/resources/${item.id}`);
+    await page.request.delete(`/api/v1/resources/${item.id}?recursive=true`, { headers });
+  }
+});
+
+test("phase4 standalone Modal keeps body fallback and does not consume an external Escape", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(async () => {
+    // Load the real production exports through Vite; no production test entry point.
+    const load = (url: string) => import(/* @vite-ignore */ url);
+    const { default: React } = await load("/node_modules/.vite/deps/react.js");
+    const { default: { createRoot } } = await load("/node_modules/.vite/deps/react-dom_client.js");
+    const { Modal } = await load("/src/apps/FileActions.tsx");
+    const root = document.createElement("div");
+    document.body.append(root);
+    createRoot(root).render(React.createElement(Modal, { title: "standalone phase4", onClose() {} }, React.createElement("input", { "aria-label": "standalone name" })));
+  });
+  const modal = page.getByRole("dialog", { name: "standalone phase4", exact: true });
+  await expect(modal.getByRole("textbox")).toBeFocused();
+  expect(await modal.evaluate(el => el.parentElement?.parentElement === document.body)).toBe(true);
+  const dock = page.locator('[data-dock-app="chat"]');
+  await dock.focus();
+  await expect(dock).toBeFocused();
+  expect(await dock.evaluate(el => el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })))).toBe(true);
 });

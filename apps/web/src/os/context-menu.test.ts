@@ -4,6 +4,9 @@ import {
   computeMenuPosition,
   isEditableElement,
   findEnabledMenuItem,
+  normalizeMenuContent,
+  type ContextMenuItem,
+  type ContextMenuGroup,
 } from "./context-menu.js";
 
 describe("computeMenuPosition", () => {
@@ -165,5 +168,71 @@ describe("findEnabledMenuItem", () => {
     const items: MenuItem[] = [];
     const result = findEnabledMenuItem(items, 0, "next");
     assert.equal(result, -1);
+  });
+});
+
+// --- Phase 5: Grid layout metadata for context menu items ---
+
+describe("grid layout metadata", () => {
+  it("ContextMenuItem supports optional grid metadata for layout presentation", () => {
+    const item: ContextMenuItem = {
+      id: "fill",
+      label: "Fill & Arrange",
+      grid: {
+        layout: "2x2",
+        cells: [
+          { id: "top-left", label: "左上", placement: "top-left" },
+          { id: "top-right", label: "右上", placement: "top-right" },
+          { id: "bottom-left", label: "左下", placement: "bottom-left" },
+          { id: "bottom-right", label: "右下", placement: "bottom-right" },
+        ],
+      },
+    };
+    assert.equal(item.grid?.layout, "2x2");
+    assert.equal(item.grid?.cells.length, 4);
+    assert.equal(item.grid?.cells[0].placement, "top-left");
+  });
+
+  it("ContextMenuItem without grid metadata remains a standard menu item", () => {
+    const item: ContextMenuItem = {
+      id: "close",
+      label: "Close",
+    };
+    assert.equal(item.grid, undefined);
+  });
+
+  it("normalizeMenuContent preserves grid metadata through groups", () => {
+    const items: ContextMenuItem[] = [
+      {
+        id: "fill",
+        label: "Fill",
+        grid: { layout: "2x2", cells: [{ id: "tl", label: "TL", placement: "top-left" }] },
+      },
+      { id: "close", label: "Close" },
+    ];
+    const groups = normalizeMenuContent(items);
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].items.length, 2);
+    assert.ok(groups[0].items[0].grid);
+    assert.equal(groups[0].items[0].grid?.layout, "2x2");
+    assert.equal(groups[0].items[1].grid, undefined);
+  });
+
+  it("normalizeMenuContent preserves grid metadata in group input", () => {
+    const groups: ContextMenuGroup[] = [
+      {
+        id: "layout",
+        items: [
+          {
+            id: "half-left",
+            label: "Left Half",
+            grid: { layout: "1x2", cells: [{ id: "left", label: "L", placement: "left" }] },
+          },
+        ],
+      },
+    ];
+    const result = normalizeMenuContent(groups);
+    assert.equal(result.length, 1);
+    assert.ok(result[0].items[0].grid);
   });
 });
