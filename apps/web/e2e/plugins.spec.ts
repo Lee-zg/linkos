@@ -216,10 +216,12 @@ test("plugin context menus use the host base and old packages stay strictly sile
     "close",
   ] as const) {
     if (action === "space") {
+      // Activate the real window before clicking controls that B may cover.
+      await page.locator(`[data-dock-app="plugin:${first.id}"]`).click();
       // First lives in its own Full Space; second stays active on the Desktop.
       await page
         .getByRole("button", { name: `进入全屏 ${first.name}`, exact: true })
-        .dispatchEvent("click");
+        .click();
       const firstTitle = page.getByLabel(`${first.name} 标题栏`, {
         exact: true,
       });
@@ -277,7 +279,7 @@ test("plugin context menus use the host base and old packages stay strictly sile
       if (action === "minimize")
         await page
           .getByRole("button", { name: `最小化 ${second.name}`, exact: true })
-          .dispatchEvent("click");
+          .click();
       if (action === "space") {
         await page.locator(`[data-dock-app="plugin:${first.id}"]`).click();
         await expect(
@@ -287,7 +289,16 @@ test("plugin context menus use the host base and old packages stay strictly sile
       if (action === "close")
         await page
           .getByRole("button", { name: `关闭 ${second.name}`, exact: true })
-          .dispatchEvent("click");
+          .click();
+      if (action === "close") {
+        // Finish the real close/unmount before measuring focus. Otherwise the
+        // normal removal of a focused frame is mistaken for a late RPC effect.
+        await expect(page.locator(`iframe[title="${second.name} 插件沙箱"]`)).toHaveCount(0);
+      } else if (action === "minimize") {
+        await expect(page.getByRole("dialog", { name: second.name, exact: true, includeHidden: true }))
+          .toHaveAttribute("data-visible", "false");
+        await expect.poll(() => second.frame.locator("body").evaluate(() => document.hasFocus())).toBe(false);
+      }
       const focusBefore = await focusMark();
       release();
       if (action === "close") {
@@ -323,7 +334,7 @@ test("plugin context menus use the host base and old packages stay strictly sile
     if (action === "space") {
       await page
         .getByRole("button", { name: `退出全屏 ${first.name}`, exact: true })
-        .dispatchEvent("click");
+        .click();
       await page.locator(`[data-dock-app="plugin:${second.id}"]`).click();
     }
     if (action === "close") {
@@ -336,10 +347,10 @@ test("plugin context menus use the host base and old packages stay strictly sile
   await expect(page.getByRole("menu")).toHaveCount(0);
   await page
     .getByRole("button", { name: `最小化 ${second.name}`, exact: true })
-    .dispatchEvent("click");
+    .click();
   await page
     .getByRole("button", { name: `最小化 ${first.name}`, exact: true })
-    .dispatchEvent("click");
+    .click();
   await open(page, old.name);
   await expect(old.frame.locator('body[data-ready="true"]')).toBeVisible();
   expect(
@@ -521,7 +532,7 @@ test("complete package installs through a sandbox probe, reads via SDK and rolls
   );
   await page
     .getByRole("button", { name: "关闭 资源阅读器", exact: true })
-    .dispatchEvent("click");
+    .click();
   await manager.locator('input[type="file"]').setInputFiles({
     name: "upgrade.linkos-plugin",
     mimeType: "application/zip",
@@ -560,7 +571,7 @@ test("complete package installs through a sandbox probe, reads via SDK and rolls
   expect(externalRequests).toBe(0);
   await page
     .getByRole("button", { name: "关闭 资源阅读器", exact: true })
-    .dispatchEvent("click");
+    .click();
   await manager.getByRole("button", { name: "回滚上一版本" }).click();
   await page.getByRole("button", { name: "确认操作" }).click();
   await expect(

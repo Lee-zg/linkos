@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Folder, Monitor, Settings } from "lucide-react";
+import { Columns2, Folder, LayoutGrid, Monitor, Settings } from "lucide-react";
 import { useAppRegistry } from "./app-registry";
 import { AppIcon } from "./AppIcon";
 import { useWindowManager } from "./window-manager";
@@ -10,8 +10,11 @@ import { useSurfaceInteractivity } from "./WindowSurface";
 import type { DynamicAppId } from "./types";
 
 export function Desktop() {
-  const { windows, desktopState, open, focus, minimize, close, minimizeAll } =
+  const { windows, desktopState, open, focus, minimize, close, minimizeAll, showOverview, enterSplit } =
     useWindowManager();
+  const splitCandidates = desktopState.windows.filter(
+    (win) => win.spaceId === "desktop" && !win.minimized,
+  );
   const visible = selectDesktopSurface(desktopState);
   const root = useRef<HTMLDivElement | null>(null);
   useSurfaceInteractivity(root, visible);
@@ -36,6 +39,22 @@ export function Desktop() {
       label: "显示桌面",
       icon: <Monitor size={14} />,
       onClick: minimizeAll,
+    },
+    {
+      id: "overview",
+      label: "Mission Control",
+      icon: <LayoutGrid size={14} />,
+      onClick: showOverview,
+    },
+    {
+      id: "split-view",
+      label: "Split View",
+      icon: <Columns2 size={14} />,
+      disabled: splitCandidates.length < 2,
+      onClick: () => {
+        if (splitCandidates.length >= 2)
+          enterSplit([splitCandidates[0].id, splitCandidates[1].id], 0.5);
+      },
     },
     {
       id: "settings",

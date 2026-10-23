@@ -45,6 +45,7 @@ export function Window({ win, order }: { win: ManagedWindow; order: number }) {
     exitFullscreen,
     exitSplit,
     switchSpace,
+    showOverview,
     desktopState,
     viewport,
     workarea,
@@ -224,10 +225,10 @@ export function Window({ win, order }: { win: ManagedWindow; order: number }) {
       grid: {
         layout: "2x2",
         cells: [
-          { id: "top-left", label: "左上", placement: "top-left" },
-          { id: "top-right", label: "右上", placement: "top-right" },
-          { id: "bottom-left", label: "左下", placement: "bottom-left" },
-          { id: "bottom-right", label: "右下", placement: "bottom-right" },
+          { id: "top-left", label: "左上", onClick: () => setPlacement(win.id, "top-left") },
+          { id: "top-right", label: "右上", onClick: () => setPlacement(win.id, "top-right") },
+          { id: "bottom-left", label: "左下", onClick: () => setPlacement(win.id, "bottom-left") },
+          { id: "bottom-right", label: "右下", onClick: () => setPlacement(win.id, "bottom-right") },
         ],
       },
       onClick: () => setPlacement(win.id, "fill"),
@@ -255,8 +256,12 @@ export function Window({ win, order }: { win: ManagedWindow; order: number }) {
         setRect(win.id, { x: centerX, y: centerY, w: win.w, h: win.h });
       },
     },
-    // Temporary, reachable Space wiring in the SAME owner/controller menu.
-    // Stage5 Chrome can reuse focus; no second app-switcher/menu state exists.
+    {
+      id: "overview",
+      label: "Mission Control",
+      onClick: showOverview,
+    },
+    // Keep Space actions in the same owner/controller menu.
     ...desktopState.windows
       .filter((item) => item.id !== win.id)
       .map((item) => ({
@@ -283,22 +288,7 @@ export function Window({ win, order }: { win: ManagedWindow; order: number }) {
       optionAccelerates: preferences.window.optionAcceleratesTiling,
     });
 
-  // Apply preview transform during gesture
-  useLayoutEffect(() => {
-    const frame = frameRef.current;
-    if (!frame) return;
-    if (isGesturing && previewRect) {
-      frame.style.left = `${previewRect.x}px`;
-      frame.style.top = `${previewRect.y}px`;
-      frame.style.width = `${previewRect.w}px`;
-      frame.style.height = `${previewRect.h}px`;
-    } else {
-      frame.style.left = "";
-      frame.style.top = "";
-      frame.style.width = "";
-      frame.style.height = "";
-    }
-  }, [isGesturing, previewRect]);
+  const renderedRect = isGesturing && previewRect ? previewRect : displayRect;
   const hidden = !appeared || !surface.visible;
   return (
     <WindowSurface
@@ -312,10 +302,10 @@ export function Window({ win, order }: { win: ManagedWindow; order: number }) {
         ref={frameRef}
         className={`desktop-window fixed flex flex-col overflow-hidden bg-background shadow-2xl motion-reduce:transition-none ${win.minimized ? "is-minimized" : ""} ${fullscreen || isMobile ? "rounded-none border-0" : "rounded-xl border"} ${hidden ? "pointer-events-none scale-[0.97] opacity-0" : "pointer-events-auto scale-100 opacity-100"}`}
         style={{
-          left: displayRect.x,
-          top: displayRect.y,
-          width: displayRect.w,
-          height: displayRect.h,
+          left: renderedRect.x,
+          top: renderedRect.y,
+          width: renderedRect.w,
+          height: renderedRect.h,
           zIndex: order,
         }}
         role="dialog"
@@ -342,7 +332,15 @@ export function Window({ win, order }: { win: ManagedWindow; order: number }) {
             <div
               ref={ref}
               className="relative flex h-10 shrink-0 items-center border-b bg-muted/50 px-3"
-              onPointerDown={startDrag}
+              onPointerDown={(event) => {
+                if (
+                  event.button !== 0 ||
+                  !canManipulate ||
+                  (event.target as Element).closest("button, input, textarea, select, a[href], [role=button], [contenteditable]")
+                ) return;
+                focus(win.id);
+                startDrag(event);
+              }}
               onDoubleClick={(e) => {
                 if (
                   !(e.target as HTMLElement).closest("button") &&

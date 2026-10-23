@@ -1,24 +1,23 @@
 import type { ReactNode } from "react";
 
-export interface ContextMenuGridCell {
+export interface ContextMenuAction {
   id: string;
   label: string;
-  placement: string;
+  disabled?: boolean;
+  restoreFocus?: boolean;
+  onClick?: () => void;
 }
+
+export type ContextMenuGridCell = ContextMenuAction;
 
 export interface ContextMenuGrid {
   layout: string;
   cells: ContextMenuGridCell[];
 }
 
-export interface ContextMenuItem {
-  id: string;
-  label: string;
+export interface ContextMenuItem extends ContextMenuAction {
   icon?: ReactNode;
-  disabled?: boolean;
-  restoreFocus?: boolean;
   grid?: ContextMenuGrid;
-  onClick?: () => void;
 }
 export interface ContextMenuGroup {
   id: string;
@@ -32,6 +31,18 @@ export function normalizeMenuContent(content: ContextMenuContent): ContextMenuGr
     ? content as ContextMenuGroup[]
     : [{ id: "items", items: content as ContextMenuItem[] }];
   return groups.filter((group) => group.items.length > 0);
+}
+
+/** Shared visual/activation order; disabled actions retain their positions. */
+export function flattenMenuActions(groups: ContextMenuGroup[]): ContextMenuAction[] {
+  return groups.flatMap((group) => group.items.flatMap((item) => [
+    item,
+    ...(item.grid?.cells.map((cell) => ({
+      ...cell,
+      disabled: item.disabled || cell.disabled,
+      restoreFocus: cell.restoreFocus ?? item.restoreFocus,
+    })) ?? []),
+  ]));
 }
 
 export interface MenuPosition {

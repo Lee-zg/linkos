@@ -247,6 +247,48 @@ test("FOCUS_LOST allows hiding", () => {
   assert.equal(state, "hiding");
 });
 
+test("keyboard focus reveals an edge dock immediately", () => {
+  assert.equal(runEvents(["FOCUS_WITHIN"]), "shown");
+});
+
+test("a real menu snapshot keeps an edge dock shown until focus and menu are both released", () => {
+  assert.equal(runEvents(["CONTEXT_MENU_OPEN", "EDGE_LEAVE"]), "shown");
+  assert.equal(runEvents(["CONTEXT_MENU_OPEN", "FOCUS_WITHIN", "CONTEXT_MENU_CLOSE", "EDGE_LEAVE"]), "shown");
+  assert.equal(runEvents(["CONTEXT_MENU_OPEN", "FOCUS_WITHIN", "CONTEXT_MENU_CLOSE", "FOCUS_LOST", "EDGE_LEAVE"]), "hiding");
+});
+
+test("focus moving from a Dock button into its Portal does not release the menu hold", () => {
+  assert.equal(runEvents([
+    "FOCUS_WITHIN", "CONTEXT_MENU_OPEN", "FOCUS_LOST", "EDGE_LEAVE",
+    { type: "HIDE_COMPLETE", elapsed: 220 },
+  ]), "shown");
+});
+
+test("paired menu owner replacement holds only until the final owner closes", () => {
+  const machine = createDockInteractionMachine();
+  let state = machine.transition("edge", "CONTEXT_MENU_OPEN");
+  state = machine.transition(state, "CONTEXT_MENU_CLOSE");
+  state = machine.transition(state, "CONTEXT_MENU_OPEN");
+  state = machine.transition(state, "EDGE_LEAVE");
+  assert.equal(state, "shown");
+  state = machine.transition(state, "CONTEXT_MENU_CLOSE");
+  assert.equal(machine.transition(state, "EDGE_LEAVE"), "hiding");
+});
+
+test("window blur clears menu and focus holds and stale timers cannot reveal the Dock", () => {
+  const machine = createDockInteractionMachine();
+  let state = machine.transition("edge", "FOCUS_WITHIN");
+  state = machine.transition(state, "CONTEXT_MENU_OPEN");
+  state = machine.transition(state, "BLUR");
+  assert.equal(state, "edge");
+  state = machine.transition(state, { type: "REVEAL_COMPLETE", elapsed: 120 });
+  state = machine.transition(state, { type: "HIDE_COMPLETE", elapsed: 220 });
+  assert.equal(state, "edge");
+  state = machine.transition(state, "EDGE_ENTER");
+  state = machine.transition(state, { type: "REVEAL_COMPLETE", elapsed: 120 });
+  assert.equal(machine.transition(state, "EDGE_LEAVE"), "hiding");
+});
+
 /* ─── getTimers ───────────────────────────────────────────────────────────── */
 
 test("getTimers returns reveal delay for revealing state", () => {

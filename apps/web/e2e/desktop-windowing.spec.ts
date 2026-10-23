@@ -37,8 +37,7 @@ function green(dialog: Locator, name: string) {
 }
 
 async function activateGreen(dialog: Locator, name: string) {
-  if (test.info().project.use.hasTouch) await green(dialog, name).dispatchEvent("click");
-  else await green(dialog, name).dispatchEvent("click");
+  await green(dialog, name).click();
 }
 
 async function expectSilentScope(page: Page, target: Locator) {
@@ -51,8 +50,7 @@ async function expectSilentScope(page: Page, target: Locator) {
 
 async function titleAction(page: Page, name: string, action: string) {
   const title = page.getByLabel(`${name} 标题栏`, { exact: true });
-  await title.focus();
-  await title.press("Shift+F10");
+  await title.click({ button: "right" });
   await page.getByRole("menuitem", { name: action, exact: true }).click();
 }
 
@@ -160,6 +158,71 @@ test("green Full covers the viewport, disables yellow, and restores Normal and F
   await expect.poll(() => chat.boundingBox()).toEqual(normal);
 });
 
+test("real yellow and red clicks do not start a title drag or lose restored geometry", async ({ page }) => {
+  await login(page);
+  const files = await launch(page, "files", "文件");
+  await files.getByLabel("文件 标题栏", { exact: true }).hover();
+  const before = (await files.boundingBox())!;
+  expect(before.width).toBeGreaterThan(0);
+  expect(before.height).toBeGreaterThan(40);
+  await files.getByRole("button", { name: "最小化 文件", exact: true }).click();
+  await expect(files).toBeHidden();
+  await page.locator('[data-dock-app="files"]').click();
+  await expect(files).toBeVisible();
+  await expect.poll(() => files.boundingBox()).toEqual(before);
+  await files.getByLabel("文件 标题栏", { exact: true }).click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Fill & Arrange", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await files.getByRole("button", { name: "关闭 文件", exact: true }).click();
+  await expect(files).toHaveCount(0);
+});
+
+test("real title dragging previews and commits geometry, while lost capture restores it", async ({
+  page,
+  isMobile,
+}) => {
+  test.skip(isMobile, "Desktop pointer dragging is unavailable on the mobile surface");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page);
+  const chat = await launch(page, "chat", "聊天");
+  const title = chat.getByLabel("聊天 标题栏", { exact: true });
+  await title.hover();
+  const before = (await chat.boundingBox())!;
+  const titleRect = (await title.boundingBox())!;
+  const start = { x: titleRect.x + titleRect.width / 2, y: titleRect.y + titleRect.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 32, start.y + 40, { steps: 4 });
+  const committed = { ...before, x: before.x + 32, y: before.y + 40 };
+  await expect.poll(() => chat.boundingBox()).toEqual(committed);
+  await expect(chat).toHaveAttribute("data-active", "true");
+  await page.mouse.up();
+  await expect.poll(() => chat.boundingBox()).toEqual(committed);
+  await title.click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Fill & Arrange", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect.poll(() => chat.boundingBox()).toEqual(committed);
+
+  // Record the real pointer ID, then release capture to exercise browser-native
+  // lostpointercapture cancellation rather than faking a successful user click.
+  await title.evaluate((element) => {
+    element.addEventListener("pointerdown", (event) => {
+      element.setAttribute("data-test-pointer-id", String((event as PointerEvent).pointerId));
+    }, { once: true });
+  });
+  await page.mouse.move(start.x + 32, start.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 64, start.y + 80, { steps: 4 });
+  await expect.poll(() => chat.boundingBox()).toEqual({ ...committed, x: committed.x + 32, y: committed.y + 40 });
+  await title.evaluate((element) => {
+    element.releasePointerCapture(Number(element.getAttribute("data-test-pointer-id")));
+  });
+  await page.mouse.move(start.x + 65, start.y + 81);
+  await expect.poll(() => chat.boundingBox()).toEqual(committed);
+  await page.mouse.up();
+  await expect.poll(() => chat.boundingBox()).toEqual(committed);
+});
+
 test("two Full Spaces remain independent and reachable through the owner title menu", async ({
   page,
 }) => {
@@ -221,14 +284,14 @@ test("host safe insets are shared once by Fill/mobile and do not shrink the Full
       const r = await chat.boundingBox();
       return r && { x: r.x, y: r.y };
     })
-    .toEqual({ x: 7, y: 35 });
+    .toEqual({ x: 7, y: 11 });
   const area = await chat.boundingBox();
   const viewport = await page.evaluate(() => ({
     w: visualViewport?.width ?? innerWidth,
     h: visualViewport?.height ?? innerHeight,
   }));
   expect(area!.width).toBeCloseTo(viewport.w - 20, 0);
-  expect(area!.height).toBeCloseTo(viewport.h - 11 - 17 - 24 - 48, 0);
+  expect(area!.height).toBeCloseTo(viewport.h - 11 - 17 - 48, 0);
   await activateGreen(chat, "聊天");
   await expectViewport(page, chat);
   expect(
@@ -290,7 +353,7 @@ test("closing the mobile active surface reveals the surviving canonical desktop 
   if (isMobile) await expect(chat).toBeHidden();
   await settings
     .getByRole("button", { name: "关闭 设置", exact: true })
-    .dispatchEvent("click");
+    .click();
   await expect(settings).toHaveCount(0);
   await expect(chat).toBeVisible();
   if (isMobile) await expect(chat).toHaveAttribute("data-active", "true");
@@ -417,7 +480,7 @@ test("a no-permission plugin keeps the same iframe, draft, boot and port across 
     await expect(frame.locator("#replies")).toHaveText("1");
     await plugin
       .getByRole("button", { name: `最小化 ${name}`, exact: true })
-      .dispatchEvent("click");
+      .click();
     await expect(plugin).toBeHidden();
     await expect(plugin).toHaveAttribute("inert", "");
     await page.locator(`[data-dock-app="plugin:${id}"]`).click();
@@ -453,7 +516,7 @@ test("a no-permission plugin keeps the same iframe, draft, boot and port across 
     await activateGreen(plugin, name);
     await plugin
       .getByRole("button", { name: `最小化 ${name}`, exact: true })
-      .dispatchEvent("click");
+      .click();
     await page.locator(`[data-dock-app="plugin:${id}"]`).click();
     expect(
       await iframe.evaluate((element, original) => element === original, node),
@@ -481,7 +544,7 @@ test("a no-permission plugin keeps the same iframe, draft, boot and port across 
     );
     await plugin
       .getByRole("button", { name: `关闭 ${name}`, exact: true })
-      .dispatchEvent("click");
+      .click();
     expect(await closingFrame).toEqual({
       connected: true,
       inert: true,

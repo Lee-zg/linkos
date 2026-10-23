@@ -15,6 +15,162 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     await login(page);
   });
 
+  test("title Fill & Arrange renders a real 2x2 grid and each cell tiles its own quadrant", async ({ page }) => {
+    test.skip(!!test.info().project.use.hasTouch, "Quadrant geometry is a desktop projection");
+    // Half of the workarea minus the default 8px tile margins must fit Files'
+    // 480x380 minimum; a small default viewport cannot establish that contract.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('[data-dock-app="files"]').click();
+    const files = page.getByRole("dialog", { name: "文件", exact: true });
+    const title = files.getByLabel("文件 标题栏", { exact: true });
+    await title.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Fill & Arrange", exact: true }).click();
+    await expect(files).toHaveAttribute("data-placement", "fill");
+    const area = (await files.boundingBox())!;
+    expect(area.width).toBeGreaterThan(0);
+    expect(area.height).toBeGreaterThan(0);
+    const margin = 8; // Default desktop preferences: tileMargins=true.
+    const width = area.width / 2 - margin * 2;
+    const height = area.height / 2 - margin * 2;
+    expect(width).toBeGreaterThanOrEqual(480);
+    expect(height).toBeGreaterThanOrEqual(380);
+    const placements = [
+      { label: "左上", placement: "top-left", column: 0, row: 0 },
+      { label: "右上", placement: "top-right", column: 1, row: 0 },
+      { label: "左下", placement: "bottom-left", column: 0, row: 1 },
+      { label: "右下", placement: "bottom-right", column: 1, row: 1 },
+    ];
+    for (const { label, placement, column, row } of placements) {
+      await title.click({ button: "right" });
+      const grid = page.getByRole("group", { name: "Fill & Arrange grid", exact: true });
+      await expect(grid).toHaveCSS("display", "grid");
+      const tracks = await grid.evaluate(element => {
+        const style = getComputedStyle(element);
+        return { columns: style.gridTemplateColumns.split(" "), rows: style.gridTemplateRows.split(" ") };
+      });
+      expect(tracks.columns).toHaveLength(2);
+      expect(tracks.rows).toHaveLength(2);
+      const cells = grid.getByRole("menuitem");
+      await expect(cells).toHaveCount(4);
+      const boxes = await Promise.all([0, 1, 2, 3].map(index => cells.nth(index).boundingBox()));
+      const [tl, tr, bl, br] = boxes.map(box => { expect(box).not.toBeNull(); return box!; });
+      expect(tl.y).toBeCloseTo(tr.y, 1);
+      expect(bl.y).toBeCloseTo(br.y, 1);
+      expect(tl.x).toBeCloseTo(bl.x, 1);
+      expect(tr.x).toBeCloseTo(br.x, 1);
+      expect(tr.x).toBeGreaterThan(tl.x + tl.width);
+      expect(bl.y).toBeGreaterThan(tl.y + tl.height);
+      await grid.getByRole("menuitem", { name: label, exact: true }).click();
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await expect(files).toHaveAttribute("data-placement", placement);
+      const expected = { x: area.x + column * area.width / 2 + margin,
+        y: area.y + row * area.height / 2 + margin, width, height };
+      await expect.poll(async () => {
+        const actual = await files.boundingBox();
+        return actual ? Math.max(...Object.keys(expected).map(key => Math.abs(actual[key as keyof typeof actual] - expected[key as keyof typeof expected]))) : Infinity;
+      }).toBeLessThan(1);
+    }
+    await title.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Fill & Arrange", exact: true }).click();
+    await expect.poll(() => files.boundingBox()).toEqual(area);
+  });
+
+  test("title grid menus stay inside viewport edges and scroll on narrow screens", async ({ page }) => {
+    test.skip(!!test.info().project.use.hasTouch, "Desktop edge placement and keyboard navigation");
+    await page.locator('[data-dock-app="files"]').click();
+    const files = page.getByRole("dialog", { name: "文件", exact: true });
+    for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 360 }]) {
+      await page.setViewportSize(viewport);
+      const title = files.getByLabel("文件 标题栏", { exact: true });
+      const titleBox = (await title.boundingBox())!;
+      await title.click({ button: "right", position: { x: titleBox.width - 30, y: titleBox.height / 2 } });
+      const menu = page.getByRole("menu");
+      const box = (await menu.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+      await expect(menu.locator(".menu-grid")).toHaveCSS("display", "grid");
+      if (viewport.width === 390) {
+        await expect(menu).toHaveCSS("overflow-y", "auto");
+        expect(await menu.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+      }
+      await page.keyboard.press("End");
+      const close = menu.getByRole("menuitem", { name: "关闭", exact: true });
+      await expect(close).toBeFocused();
+      await expect(close).toBeInViewport();
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveCount(0);
+    }
+  });
+
+  test("title grid keyboard focus and Enter/Space activate the selected quadrant", async ({ page }) => {
+    test.skip(!!test.info().project.use.hasTouch, "Desktop keyboard tiling");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('[data-dock-app="files"]').click();
+    const files = page.getByRole("dialog", { name: "文件", exact: true });
+    for (const action of [
+      { key: "Space", label: "左上", placement: "top-left", steps: 5 },
+      { key: "Enter", label: "右下", placement: "bottom-right", steps: 8 },
+    ]) {
+      await files.getByLabel("文件 标题栏", { exact: true }).click({ button: "right" });
+      await page.keyboard.press("Home");
+      for (let index = 0; index < action.steps; index++) await page.keyboard.press("ArrowDown");
+      const cell = page.getByRole("menuitem", { name: action.label, exact: true });
+      await expect(cell).toBeFocused();
+      await expect(cell).toHaveCSS("outline-style", "solid");
+      await expect(cell).toHaveCSS("outline-width", "2px");
+      await page.keyboard.press(action.key);
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await expect(files).toHaveAttribute("data-placement", action.placement);
+    }
+    await files.getByLabel("文件 标题栏", { exact: true }).click({ button: "right" });
+    await page.keyboard.press("End");
+    await expect(page.getByRole("menuitem", { name: "关闭", exact: true })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(files.getByLabel("文件 标题栏", { exact: true })).toBeFocused();
+  });
+
+  for (const space of ["fullscreen", "split"] as const) {
+    test(`title grid inherits disabled state in ${space} and cannot change window geometry`, async ({ page }) => {
+      test.skip(!!test.info().project.use.hasTouch, "Special-space desktop geometry");
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.locator('[data-dock-app="files"]').click();
+      const files = page.getByRole("dialog", { name: "文件", exact: true });
+      if (space === "fullscreen") {
+        await files.getByRole("button", { name: "进入全屏 文件", exact: true }).click();
+      } else {
+        await page.locator('[data-dock-app="chat"]').click();
+        await page.locator(".wallpaper").click({ button: "right", position: { x: 1300, y: 100 } });
+        await page.getByRole("menuitem", { name: "Split View", exact: true }).click();
+      }
+      await expect(files).toHaveAttribute("data-space-type", space);
+      const before = (await files.boundingBox())!;
+      expect(before.width).toBeGreaterThan(0);
+      expect(before.height).toBeGreaterThan(0);
+      await files.getByLabel("文件 标题栏", { exact: true }).click({ button: "right" });
+      await expect(page.getByRole("menuitem", { name: "Fill & Arrange", exact: true })).toBeDisabled();
+      const cells = page.getByRole("group", { name: "Fill & Arrange grid", exact: true }).getByRole("menuitem");
+      await expect(cells).toHaveCount(4);
+      for (let index = 0; index < 4; index++) {
+        const cell = cells.nth(index);
+        await expect(cell).toBeDisabled();
+        await expect(cell).toHaveCSS("opacity", "0.4");
+        const box = (await cell.boundingBox())!;
+        // Locator.click intentionally refuses disabled controls. A genuine mouse
+        // click at their visible bounds proves browser/overlay guards, not force.
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        await expect(page.getByRole("menu")).toHaveCount(1);
+        await expect(files).toHaveAttribute("data-space-type", space);
+        await expect(files).toHaveAttribute("data-placement", "normal");
+        await expect.poll(() => files.boundingBox()).toEqual(before);
+      }
+      await page.keyboard.press("Home");
+      await expect(page.getByRole("menuitem", { name: "退出全屏", exact: true })).toBeFocused();
+      await page.keyboard.press("Escape");
+    });
+  }
+
   test("8-direction resize handles are present on desktop windows", async ({
     page,
   }) => {
@@ -63,7 +219,7 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     }
   });
 
-  test("Split View menu item is present in chrome menu", async ({ page }) => {
+  test("Split View menu item is present in desktop context menu", async ({ page }) => {
     // Open two windows
     await page.click('[data-dock-app="files"]');
     await page.waitForSelector('[data-window-id^="files-"]', { timeout: 5000 });
@@ -71,8 +227,8 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     await page.click('[data-dock-app="chat"]');
     await page.waitForSelector('[data-window-id^="chat-"]', { timeout: 5000 });
 
-    // Right-click on chrome to open menu
-    await page.click(".desktop-chrome", { button: "right" });
+    // Right-click on desktop context to open menu
+    await page.locator(".wallpaper").click({ button: "right", position: { x: 1200, y: 100 } });
     await page.waitForSelector("[data-context-menu-overlay]", { timeout: 3000 });
 
     // Check for Split View menu item
@@ -93,8 +249,8 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     await page.click('[data-dock-app="chat"]');
     await page.waitForSelector('[data-window-id^="chat-"]', { timeout: 5000 });
 
-    // Open chrome menu and click Split View
-    await page.click(".desktop-chrome", { button: "right" });
+    // Open desktop context menu and click Split View
+    await page.locator(".wallpaper").click({ button: "right", position: { x: 1200, y: 100 } });
     await page.waitForSelector("[data-context-menu-overlay]", { timeout: 3000 });
     await page.click("text=Split View");
 
@@ -114,7 +270,7 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     await page.click('[data-dock-app="chat"]');
     await page.waitForSelector('[data-window-id^="chat-"]', { timeout: 5000 });
 
-    await page.click(".desktop-chrome", { button: "right" });
+    await page.locator(".wallpaper").click({ button: "right", position: { x: 1200, y: 100 } });
     await page.waitForSelector("[data-context-menu-overlay]", { timeout: 3000 });
     await page.click("text=Split View");
     await page.waitForTimeout(500);
@@ -138,7 +294,7 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     await page.click('[data-dock-app="chat"]');
     await page.waitForSelector('[data-window-id^="chat-"]', { timeout: 5000 });
 
-    await page.click(".desktop-chrome", { button: "right" });
+    await page.locator(".wallpaper").click({ button: "right", position: { x: 1200, y: 100 } });
     await page.waitForSelector("[data-context-menu-overlay]", { timeout: 3000 });
     await page.click("text=Split View");
     await page.waitForTimeout(500);
@@ -174,9 +330,8 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     const files = page.getByRole("dialog", { name: "文件" });
     await expect(files).toBeVisible();
 
-    // Enter fullscreen via the green button (3rd window-control)
-    // Use dispatchEvent to bypass chrome menubar pointer interception
-    await files.getByRole("button", { name: /进入全屏 文件/ }).dispatchEvent("click");
+    // A real pointer click must hit the control without starting title drag.
+    await files.getByRole("button", { name: /进入全屏 文件/ }).click();
     await expect(files).toHaveAttribute("data-space-type", "fullscreen");
 
     // Check no resize handles on fullscreen
@@ -191,8 +346,8 @@ test.describe("Phase 7: Desktop Resize, Tiling, and Split View", () => {
     await page.click('[data-dock-app="files"]');
     await page.waitForSelector('[data-window-id^="files-"]', { timeout: 5000 });
 
-    // Open chrome menu
-    await page.click(".desktop-chrome", { button: "right" });
+    // Open desktop context menu
+    await page.locator(".wallpaper").click({ button: "right", position: { x: 1200, y: 100 } });
     await page.waitForSelector("[data-context-menu-overlay]", { timeout: 3000 });
 
     // Check Split View is disabled - use role selector to find the button,

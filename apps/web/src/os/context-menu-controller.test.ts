@@ -184,6 +184,54 @@ describe("context menu ownership controller", () => {
   });
 });
 
+describe("grid action ownership", () => {
+  for (const restoreFocus of [undefined, false, true]) it(`cell activation inherits focus policy (${restoreFocus}) and reports activate once`, () => {
+    const { controller: c, app, target } = fixture();
+    const calls: string[] = [];
+    const token = c.open(app, { anchor: { x: 0, y: 0 }, target,
+      onClose: (_token, reason) => calls.push(reason),
+      content: [{ id: "parent", label: "Parent", restoreFocus: false, onClick: () => calls.push("parent"),
+        grid: { layout: "2x2", cells: [{ id: "cell", label: "Cell", restoreFocus, onClick: () => calls.push("cell") }] } },
+        { id: "last", label: "Last", onClick: () => calls.push("last") }],
+    })!;
+    c.activate(token, 1);
+    c.activate(token, 1);
+    assert.deepEqual(calls, ["activate", "cell"]);
+    assert.equal(target.focused, restoreFocus === true ? 1 : 0);
+  });
+
+  it("cell focus is restored before the action and never to a disconnected target", () => {
+    for (const connected of [true, false]) {
+      const { controller: c, app, target } = fixture();
+      Object.assign(target, { isConnected: connected });
+      const token = c.open(app, { anchor: { x: 0, y: 0 }, target, content: [{ id: "parent", label: "Parent",
+        grid: { layout: "2x2", cells: [{ id: "cell", label: "Cell", onClick: () => assert.equal(target.focused, connected ? 1 : 0) }] } }] })!;
+      c.activate(token, 1);
+      assert.equal(c.getSnapshot(), null);
+    }
+  });
+
+  for (const invalidation of ["dismiss", "replace", "inactive", "disconnect", "parent-disabled", "cell-disabled"]) {
+    it(`does not execute a grid callback after ${invalidation}`, () => {
+      const { controller: c, app, inner, target } = fixture();
+      let calls = 0;
+      const token = c.open(app, { anchor: { x: 0, y: 0 }, target, content: [{ id: "parent", label: "Parent",
+        disabled: invalidation === "parent-disabled", grid: { layout: "2x2", cells: [
+          { id: "cell", label: "Cell", disabled: invalidation === "cell-disabled", onClick: () => calls++ },
+        ] } }] })!;
+      if (invalidation === "dismiss") c.dismiss();
+      if (invalidation === "replace") c.open(app, { anchor: { x: 1, y: 1 }, content: items });
+      if (invalidation === "inactive") c.setScopeActive(app, false);
+      if (invalidation === "disconnect") Object.assign(inner, { isConnected: false });
+      const latest = c.getSnapshot()?.token;
+      c.activate(token, 1);
+      assert.equal(calls, 0);
+      assert.equal(target.focused, 0);
+      if (invalidation === "replace") assert.equal(c.getSnapshot()?.token, latest);
+    });
+  }
+});
+
 function eventsFixture() {
   const f = fixture();
   const doc = Object.assign(new EventTarget(), { defaultView: new EventTarget() });

@@ -29,8 +29,6 @@ import {
 import { useDesktopPreferences } from "./DesktopPreferencesProvider";
 import { useDesktopViewport } from "./useDesktopViewport";
 
-const DESKTOP_MENU_BAR_SIZE = 24;
-
 function readHostSafeInsets(): DesktopWorkareaOptions["safeInsets"] {
   if (typeof document === "undefined") return undefined;
   const style = getComputedStyle(document.documentElement);
@@ -47,15 +45,8 @@ export function desktopWorkareaFromPreferences(
   preferences: DesktopPreferencesV1,
   safeInsets?: DesktopWorkareaOptions["safeInsets"],
 ): Rect {
-  const menuBarPersistent =
-    preferences.menuBar.hideMode === "never" ||
-    preferences.menuBar.hideMode === "fullscreen-only";
   return computeDesktopWorkarea(viewport, {
     safeInsets,
-    menuBar: {
-      persistent: menuBarPersistent,
-      size: DESKTOP_MENU_BAR_SIZE,
-    },
     dock: {
       persistent: !preferences.dock.autoHide,
       position: preferences.dock.position,
@@ -188,7 +179,12 @@ export function WindowManagerProvider({ children }: { children: ReactNode }) {
     [],
   );
   const switchSpace = useCallback(
-    (spaceId: string) => dispatch({ type: "SWITCH_SPACE", spaceId }),
+    (spaceId: string) => {
+      // A deliberate selection commits the destination; a later overlay
+      // dismissal must not restore the space from before Mission Control.
+      dispatch({ type: "DISMISS_OVERVIEW" });
+      dispatch({ type: "SWITCH_SPACE", spaceId });
+    },
     [],
   );
   const setPlacement = useCallback(

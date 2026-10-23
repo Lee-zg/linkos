@@ -43,7 +43,7 @@ test("chat search and message thread surface", async ({ page }) => {
 test("code editor and administration load", async ({ page }) => {
   await openApp(page, "代码");
   await expect(page.getByLabel("代码编辑器")).toBeVisible();
-  await page.getByRole("button", { name: "关闭 代码" }).dispatchEvent("click");
+  await page.getByRole("button", { name: "关闭 代码" }).click();
   await openApp(page, "管理后台");
   await expect(page.getByText("成员与设备")).toBeVisible();
   await expect(page.getByText("Runner", { exact: true })).toBeVisible();
@@ -78,7 +78,7 @@ async function selectCodeFile(
   path: string,
 ) {
   const code = page.getByRole("dialog", { name: "代码", exact: true });
-  await code.getByRole("button", { name: path, exact: true }).dispatchEvent("click");
+  await code.getByRole("button", { name: path, exact: true }).click();
   await expect(code.locator(".cm-content")).toBeVisible();
   return code;
 }
@@ -155,8 +155,12 @@ test.describe("code save integrity", () => {
     expect(
       await page.evaluate((key) => localStorage.getItem(key), draftKey),
     ).toBe("legacy partial draft");
-    await page.getByRole("button", { name: "关闭 代码", exact: true }).dispatchEvent("click");
-    await expect(code).toHaveCount(0);
+    const oldWindowId = await code.getAttribute("data-window-id");
+    expect(oldWindowId).toBeTruthy();
+    await page.getByRole("button", { name: "关闭 代码", exact: true }).click();
+    // A closing window becomes aria-hidden before its animation unmounts it.
+    // Reopen only once the old instance is physically gone.
+    await expect(page.locator(`[data-window-id="${oldWindowId}"]`)).toHaveCount(0);
     await openApp(page, "代码");
     code = await selectCodeFile(page, file.path);
     await expect(
@@ -194,7 +198,7 @@ test.describe("code save integrity", () => {
     const saved = page.waitForResponse((response) =>
       response.url().includes(`${short.file.id}/save`),
     );
-    await code.getByRole("button", { name: "保存", exact: true }).dispatchEvent("click");
+    await code.getByRole("button", { name: "保存", exact: true }).click();
     expect((await saved).status()).toBe(200);
     await expect(
       code.getByRole("button", { name: "保存", exact: true }),
@@ -246,7 +250,7 @@ test.describe("code save integrity", () => {
     try {
       await code
         .getByRole("button", { name: long.file.path, exact: true })
-        .dispatchEvent("click");
+        .click();
       await expect(
         code.getByText("加载代码...", { exact: true }),
       ).toBeVisible();

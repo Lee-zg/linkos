@@ -105,7 +105,7 @@ export function createDockInteractionMachine(): DockInteractionMachine {
     }
     if (event === "CONTEXT_MENU_OPEN") {
       paused = true;
-      return state === "hiding" ? "shown" : state;
+      return "shown";
     }
     if (event === "CONTEXT_MENU_CLOSE") {
       paused = false;
@@ -113,7 +113,7 @@ export function createDockInteractionMachine(): DockInteractionMachine {
     }
     if (event === "FOCUS_WITHIN") {
       focused = true;
-      return state === "hiding" ? "shown" : state;
+      return "shown";
     }
     if (event === "FOCUS_LOST") {
       focused = false;

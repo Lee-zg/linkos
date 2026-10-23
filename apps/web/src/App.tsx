@@ -20,7 +20,6 @@ import { AccessGate } from "./gate/AccessGate";
 import { AppRegistryProvider, useAppRegistry } from "./os/app-registry";
 import { DesktopPreferencesProvider } from "./os/DesktopPreferencesProvider";
 import { DesktopViewportProvider } from "./os/useDesktopViewport";
-import { DesktopChrome } from "./os/DesktopChrome";
 import { SpaceOverview } from "./os/SpaceOverview";
 
 function Shell() {
@@ -69,7 +68,6 @@ function Shell() {
       }
       data-overview={!!desktopState.overviewReturn}
     >
-      <DesktopChrome />
       <Desktop />
       <WindowLayer />
       <SpaceOverview />

@@ -734,7 +734,7 @@ test("offline connection change preserves cached listing without failed refresh"
 test("phase4 owner scope root and container become inert and aria-hidden together", async ({ page }) => {
   const files = await openFiles(page);
   const id = await files.getAttribute("data-window-id");
-  await files.getByRole("button", { name: "最小化 文件", exact: true }).dispatchEvent("click");
+  await files.getByRole("button", { name: "最小化 文件", exact: true }).click();
   const root = page.locator(`[data-window-owner="${id}"]`);
   for (const target of [root, root.locator(".window-portal-container")]) {
     await expect(target).toHaveAttribute("inert", "");
@@ -758,10 +758,10 @@ test("phase4 rename retains its owner DOM, selection and focus across Full Space
   await page.route("**/api/v1/resources?*", route => route.fulfill({ json: listing([resource("phase4", "原名称", "file")]) }));
   const files = await openFiles(page);
   await page.locator('[data-dock-app="chat"]').click();
-  await page.getByRole("button", { name: "进入全屏 聊天", exact: true }).dispatchEvent("click");
+  await page.getByRole("button", { name: "进入全屏 聊天", exact: true }).click();
   await phase4TitleAction(page, "聊天", "显示桌面");
   await page.locator('[data-dock-app="files"]').click();
-  await files.getByRole("button", { name: "进入全屏 文件", exact: true }).dispatchEvent("click");
+  await files.getByRole("button", { name: "进入全屏 文件", exact: true }).click();
   await files.getByRole("row", { name: "原名称", exact: true }).press("F2");
   const modal = page.getByRole("dialog", { name: "重命名", exact: true, includeHidden: true });
   const input = modal.getByRole("textbox", { name: "名称", exact: true, includeHidden: true });
@@ -796,7 +796,7 @@ test("phase4 owner bounds leave Chrome and another normal window focusable, with
   const files = await openFiles(page);
   await page.locator('[data-dock-app="chat"]').click();
   await page.locator('[data-dock-app="files"]').click();
-  await files.getByRole("button", { name: "新建文件夹", exact: true }).dispatchEvent("click");
+  await files.getByRole("button", { name: "新建文件夹", exact: true }).click();
   const modal = page.getByRole("dialog", { name: "新建文件夹", exact: true });
   const input = modal.getByRole("textbox");
   const mask = modal.locator("..");
@@ -861,11 +861,11 @@ test("phase4 pending rename sends once and survives Space and minimize until the
     await reached;
     expect(await modal.evaluate(el => !!el.closest("[data-window-owner]"))).toBe(true);
     await page.locator('[data-dock-app="chat"]').click();
-    await page.getByRole("button", { name: "进入全屏 聊天", exact: true }).dispatchEvent("click");
+    await page.getByRole("button", { name: "进入全屏 聊天", exact: true }).click();
     await expect(modal).toBeHidden();
     await phase4TitleAction(page, "聊天", "显示桌面");
     await page.locator('[data-dock-app="files"]').click();
-    await files.getByRole("button", { name: "最小化 文件", exact: true }).dispatchEvent("click");
+    await files.getByRole("button", { name: "最小化 文件", exact: true }).click();
     await expect(modal).toBeHidden();
     release();
     await expect.poll(() => requests).toBe(1);

@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import * as menuAPI from "./context-menu.js";
 import {
   computeMenuPosition,
   isEditableElement,
@@ -171,6 +172,41 @@ describe("findEnabledMenuItem", () => {
   });
 });
 
+describe("flattenMenuActions", () => {
+  it("orders parent, cells, next item across groups without mutating the source", () => {
+    const onClick = () => {};
+    const groups: ContextMenuGroup[] = [
+      { id: "one", items: [{ id: "parent", label: "Parent", restoreFocus: false,
+        grid: { layout: "2x2", cells: [
+          { id: "a", label: "A", onClick },
+          { id: "b", label: "B", disabled: true, restoreFocus: true },
+        ] } }, { id: "next", label: "Next" }] },
+      { id: "two", items: [{ id: "last", label: "Last" }] },
+    ];
+    assert.equal(typeof menuAPI.flattenMenuActions, "function");
+    const actions = menuAPI.flattenMenuActions(groups);
+    assert.deepEqual(actions.map(action => action.id), ["parent", "a", "b", "next", "last"]);
+    assert.equal(actions[1].onClick, onClick);
+    assert.equal(actions[1].restoreFocus, false);
+    assert.equal(actions[2].restoreFocus, true);
+    assert.equal(actions[2].disabled, true);
+    assert.equal(groups[0].items[0].grid!.cells[0].restoreFocus, undefined);
+    assert.equal(findEnabledMenuItem(actions, 1, "next"), 3);
+    assert.equal(findEnabledMenuItem(actions, 0, "prev"), 4);
+  });
+
+  it("a disabled parent disables every cell, retaining indices even when all disabled", () => {
+    assert.equal(typeof menuAPI.flattenMenuActions, "function");
+    const actions = menuAPI.flattenMenuActions(normalizeMenuContent([{ id: "off", label: "Off", disabled: true,
+      grid: { layout: "2x2", cells: [{ id: "cell", label: "Cell", disabled: false }] } }]));
+    assert.equal(actions.length, 2);
+    assert.ok(actions.every(action => action.disabled));
+    assert.equal(findEnabledMenuItem(actions, -1, "next"), -1);
+    assert.equal(findEnabledMenuItem(actions, -1, "prev"), -1);
+    assert.deepEqual(menuAPI.flattenMenuActions([]), []);
+  });
+});
+
 // --- Phase 5: Grid layout metadata for context menu items ---
 
 describe("grid layout metadata", () => {
@@ -181,16 +217,16 @@ describe("grid layout metadata", () => {
       grid: {
         layout: "2x2",
         cells: [
-          { id: "top-left", label: "左上", placement: "top-left" },
-          { id: "top-right", label: "右上", placement: "top-right" },
-          { id: "bottom-left", label: "左下", placement: "bottom-left" },
-          { id: "bottom-right", label: "右下", placement: "bottom-right" },
+          { id: "top-left", label: "左上", onClick() {} },
+          { id: "top-right", label: "右上", onClick() {} },
+          { id: "bottom-left", label: "左下", onClick() {} },
+          { id: "bottom-right", label: "右下", onClick() {} },
         ],
       },
     };
     assert.equal(item.grid?.layout, "2x2");
     assert.equal(item.grid?.cells.length, 4);
-    assert.equal(item.grid?.cells[0].placement, "top-left");
+    assert.equal(typeof item.grid?.cells[0].onClick, "function");
   });
 
   it("ContextMenuItem without grid metadata remains a standard menu item", () => {
@@ -206,7 +242,7 @@ describe("grid layout metadata", () => {
       {
         id: "fill",
         label: "Fill",
-        grid: { layout: "2x2", cells: [{ id: "tl", label: "TL", placement: "top-left" }] },
+        grid: { layout: "2x2", cells: [{ id: "tl", label: "TL" }] },
       },
       { id: "close", label: "Close" },
     ];
@@ -226,7 +262,7 @@ describe("grid layout metadata", () => {
           {
             id: "half-left",
             label: "Left Half",
-            grid: { layout: "1x2", cells: [{ id: "left", label: "L", placement: "left" }] },
+            grid: { layout: "1x2", cells: [{ id: "left", label: "L" }] },
           },
         ],
       },

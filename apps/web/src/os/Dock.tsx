@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { Download, LogOut, Minimize2, Pin, Trash2, X } from "lucide-react";
 import { useAppRegistry } from "./app-registry";
 import { AppIcon } from "./AppIcon";
 import { useWindowManager } from "./window-manager";
 import { useSession } from "../lib/session";
-import type { ContextMenuItem } from "./ContextMenu";
+import { useContextMenu, useContextMenuSnapshot, type ContextMenuItem } from "./ContextMenu";
+import type { MenuSnapshot, MenuToken } from "./context-menu-controller";
 import { ContextMenuScope } from "./ContextMenuScope";
 import { requestFileLocation } from "../lib/file-intent";
 import { getGatewayBase } from "../lib/api";
@@ -16,6 +17,11 @@ import { useDesktopPreferences } from "./DesktopPreferencesProvider";
 import { createDockInteractionMachine } from "./dock-interaction";
 import type { DockInteractionState } from "./dock-interaction";
 import { computeDockLayout } from "./dock-layout";
+
+function dockMenuToken(menu: MenuSnapshot | null): MenuToken | null {
+  return menu?.scope.owner.kind === "shell" && menu.scope.owner.objectId.startsWith("dock:")
+    ? menu.token : null;
+}
 
 export function Dock({ connected }: { connected: boolean }) {
   const { windows, desktopState, open, focus, close, minimize, quitApp, recentApps } =
@@ -110,62 +116,124 @@ export function Dock({ connected }: { connected: boolean }) {
 
   // ── Interaction state machine ───────────────────────────────────────
   const interactionMachine = useRef(createDockInteractionMachine()).current;
-  const [interactionState, setInteractionState] =
-    useState<DockInteractionState>("edge");
-  const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [interactionState, setInteractionState] = useState<DockInteractionState>("edge");
+  const stateRef = useRef<DockInteractionState>("edge");
+  const { controller } = useContextMenu();
+  const menuSnapshot = useContextMenuSnapshot();
+  const menuTokenRef = useRef<MenuToken | null>(null);
+  const pointerWithin = useRef(false);
+  const windowActive = useRef(true);
+  const revealTimer = useRef<ReturnType<typeof setTimeout>>();
+  const hideTimer = useRef<ReturnType<typeof setTimeout>>();
+  const leaveTimer = useRef<ReturnType<typeof setTimeout>>();
 
   const clearTimers = useCallback(() => {
-    if (revealTimer.current) {
-      clearTimeout(revealTimer.current);
-      revealTimer.current = null;
-    }
-    if (hideTimer.current) {
-      clearTimeout(hideTimer.current);
-      hideTimer.current = null;
-    }
+    clearTimeout(revealTimer.current);
+    clearTimeout(hideTimer.current);
+    clearTimeout(leaveTimer.current);
+    revealTimer.current = hideTimer.current = leaveTimer.current = undefined;
   }, []);
 
+  // The machine is mutable: never run it or schedule timers in a React updater.
   const dispatch = useCallback(
     (event: Parameters<typeof interactionMachine.transition>[1]) => {
-      setInteractionState((prev) => {
-        const next = interactionMachine.transition(prev, event);
-        if (next === "revealing" && prev !== "revealing") {
-          clearTimers();
-          revealTimer.current = setTimeout(() => {
-            dispatch({ type: "REVEAL_COMPLETE", elapsed: 120 });
-          }, 120);
+      const prev = stateRef.current;
+      const next = interactionMachine.transition(prev, event);
+      stateRef.current = next;
+      setInteractionState(next);
+      if (event === "BLUR") clearTimers();
+      if (next !== prev) {
+        // Finishing a reveal must not cancel an already scheduled pointer leave.
+        clearTimeout(revealTimer.current);
+        clearTimeout(hideTimer.current);
+        if (next === "revealing") {
+          revealTimer.current = setTimeout(() => dispatch({ type: "REVEAL_COMPLETE", elapsed: 120 }), 120);
+        } else if (next === "hiding") {
+          hideTimer.current = setTimeout(() => dispatch({ type: "HIDE_COMPLETE", elapsed: 220 }), 220);
         }
-        if (next === "hiding" && prev !== "hiding") {
-          clearTimers();
-          hideTimer.current = setTimeout(() => {
-            dispatch({ type: "HIDE_COMPLETE", elapsed: 220 });
-          }, 220);
-        }
-        if (next === "edge" && prev !== "edge") {
-          clearTimers();
-        }
-        return next;
-      });
+      }
     },
     [interactionMachine, clearTimers],
   );
 
-  // Auto-hide: dock is visible when shown/revealing or when autoHide is off
-  const isDockVisible =
-    visible &&
-    (!dockPrefs.autoHide ||
-      interactionState === "shown" ||
-      interactionState === "revealing");
+  const syncMenu = useCallback(() => {
+    // Read live ownership even before the subscription's render/effect has run.
+    const token = dockMenuToken(controller.getSnapshot());
+    if (token !== menuTokenRef.current) {
+      if (menuTokenRef.current) dispatch("CONTEXT_MENU_CLOSE");
+      menuTokenRef.current = token;
+      if (token) dispatch("CONTEXT_MENU_OPEN");
+    }
+    return token;
+  }, [controller, dispatch]);
 
-  // Cleanup on unmount
-  useEffect(() => () => clearTimers(), [clearTimers]);
+  const settleVisibility = useCallback(() => {
+    if (!windowActive.current || !visible) return;
+    const token = syncMenu();
+    const focused = !!wrap.current?.contains(document.activeElement);
+    dispatch(focused ? "FOCUS_WITHIN" : "FOCUS_LOST");
+    if (!token && !focused && !pointerWithin.current) dispatch("EDGE_LEAVE");
+  }, [dispatch, syncMenu, visible]);
+
+  useEffect(() => {
+    syncMenu();
+    // finish() restores Escape focus after publishing the closed snapshot.
+    // Re-read the controller so an older close cannot release a replacement token.
+    settleVisibility();
+  }, [menuSnapshot, syncMenu, settleVisibility]);
+
+  useEffect(() => {
+    const blur = () => {
+      windowActive.current = false;
+      pointerWithin.current = false;
+      if (menuTokenRef.current) dispatch("CONTEXT_MENU_CLOSE");
+      menuTokenRef.current = null;
+      dispatch("BLUR");
+    };
+    const focus = () => { windowActive.current = true; };
+    window.addEventListener("blur", blur);
+    window.addEventListener("focus", focus);
+    return () => {
+      clearTimers();
+      window.removeEventListener("blur", blur);
+      window.removeEventListener("focus", focus);
+    };
+  }, [clearTimers, dispatch]);
+
+  useEffect(() => {
+    if (!visible) {
+      pointerWithin.current = false;
+      if (menuTokenRef.current) dispatch("CONTEXT_MENU_CLOSE");
+      menuTokenRef.current = null;
+      dispatch("BLUR");
+    }
+  }, [visible, dispatch]);
+
+  const enterDock = () => {
+    pointerWithin.current = true;
+    clearTimeout(leaveTimer.current);
+    if (dockPrefs.autoHide) dispatch("EDGE_ENTER");
+  };
+  const leaveDock = () => {
+    pointerWithin.current = false;
+    syncMenu();
+    clearTimeout(leaveTimer.current);
+    // Allow the pointer to cross the visual Dock's inset from its 2px edge.
+    leaveTimer.current = setTimeout(settleVisibility, 180);
+  };
+
+  const isDockVisible = visible && (!dockPrefs.autoHide ||
+    !!dockMenuToken(menuSnapshot) || interactionState === "shown" || interactionState === "revealing");
 
   // ── Magnification ───────────────────────────────────────────────────
   const surface = useRef<HTMLDivElement>(null);
   const frame = useRef(0);
   const drag = useRef<string | null>(null);
   const reducedMotion = useRef(false);
+
+  useLayoutEffect(() => {
+    surface.current?.toggleAttribute("inert", !isDockVisible);
+  }, [isDockVisible]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -320,6 +388,11 @@ export function Dock({ connected }: { connected: boolean }) {
   const slotSize = effectiveSize;
 
   return (
+    <>
+    {dockPrefs.autoHide && visible && (
+      <span className="dock-edge-trigger" data-position={dockPrefs.position} aria-hidden="true"
+        onPointerEnter={enterDock} onPointerLeave={leaveDock} />
+    )}
     <div
       ref={wrap}
       className={`desktop-dock-wrap ${positionClass}`}
@@ -330,22 +403,16 @@ export function Dock({ connected }: { connected: boolean }) {
       data-interaction-state={interactionState}
       data-auto-hide={dockPrefs.autoHide}
       aria-hidden={!isDockVisible || undefined}
-      onPointerEnter={() => {
-        if (dockPrefs.autoHide) dispatch("EDGE_ENTER");
+      onPointerEnter={enterDock}
+      onPointerLeave={leaveDock}
+      onFocus={() => dispatch("FOCUS_WITHIN")}
+      onBlur={(event) => {
+        if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+        const token = syncMenu();
+        dispatch("FOCUS_LOST");
+        if (!token) settleVisibility();
       }}
-      onPointerLeave={() => {
-        if (dockPrefs.autoHide) dispatch("EDGE_LEAVE");
-      }}
-      onBlur={() => dispatch("BLUR")}
     >
-      {/* Edge trigger zone for auto-hide */}
-      {dockPrefs.autoHide && interactionState === "edge" && (
-        <span
-          className="dock-edge-trigger"
-          data-position={dockPrefs.position}
-          onPointerEnter={() => dispatch("EDGE_ENTER")}
-        />
-      )}
       <div
         ref={surface}
         className="desktop-dock"
@@ -354,10 +421,7 @@ export function Dock({ connected }: { connected: boolean }) {
         data-position={dockPrefs.position}
         style={{ "--dock-slot-size": `${slotSize}px` } as React.CSSProperties}
         onPointerMove={magnify}
-        onPointerLeave={() => {
-          reset();
-          if (dockPrefs.autoHide) dispatch("EDGE_LEAVE");
-        }}
+        onPointerLeave={reset}
         onKeyDown={(event) => {
           const arrowKeys =
             dockPrefs.position === "bottom"
@@ -402,7 +466,6 @@ export function Dock({ connected }: { connected: boolean }) {
               active={isDockVisible}
               getMenu={() => {
                 reset();
-                dispatch("CONTEXT_MENU_OPEN");
                 return menu(app.id);
               }}
             >
@@ -520,5 +583,6 @@ export function Dock({ connected }: { connected: boolean }) {
         </button>
       </div>
     </div>
+    </>
   );
 }

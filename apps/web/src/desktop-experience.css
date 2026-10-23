@@ -1091,39 +1091,6 @@
   }
 }
 
-/* Phase 5: Desktop Chrome */
-.desktop-chrome {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: var(--layer-chrome);
-  transition: transform 200ms ease, opacity 200ms ease;
-}
-.desktop-chrome[data-visible="false"] {
-  pointer-events: none;
-}
-.desktop-chrome-controls-btn {
-  position: absolute;
-  top: 0;
-  right: 0;
-  min-width: 44px;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 0 0 0 8px;
-  cursor: pointer;
-  font-size: 11px;
-  z-index: 1;
-}
-.desktop-chrome-controls-btn:focus-visible {
-  outline: 2px solid #2b87e9;
-  outline-offset: 2px;
-}
-
 /* Phase 5: Space Overview */
 .space-overview {
   position: fixed;
@@ -1163,7 +1130,7 @@
 }
 
 /* Phase 5: Grid layout in context menu */
-[data-context-menu-overlay] [role="menuitem"] .menu-grid {
+[data-context-menu-overlay] .menu-grid {
   display: grid;
   gap: 2px;
   padding: 4px;
@@ -1189,8 +1156,17 @@
   background: rgba(0, 0, 0, 0.06);
   transition: background 100ms ease;
 }
-.menu-grid-cell:hover {
+.menu-grid-cell:hover:not(:disabled) {
   background: rgba(0, 0, 0, 0.12);
+}
+.menu-grid-cell:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  background: rgba(0, 0, 0, 0.12);
+}
+.menu-grid-cell:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Phase 6: Dock Position Variants - see .desktop-dock-wrap--* above */
@@ -1245,6 +1221,7 @@
 .dock-edge-trigger {
   position: fixed;
   z-index: calc(var(--layer-chrome) + 1);
+  pointer-events: auto;
 }
 .dock-edge-trigger[data-position="bottom"] {
   bottom: 0;

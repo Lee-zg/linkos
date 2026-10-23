@@ -1,4 +1,4 @@
-import { normalizeMenuContent, type ContextMenuContent, type ContextMenuGroup, type MenuPosition } from "./context-menu";
+import { flattenMenuActions, normalizeMenuContent, type ContextMenuContent, type ContextMenuGroup, type MenuPosition } from "./context-menu";
 
 export type MenuOwner =
   | { kind: "desktop" }
@@ -137,7 +137,7 @@ export class ContextMenuController {
     const menu = this.menu;
     if (!menu || menu.token !== token) return;
     if (!this.isScopeActive(menu.scope)) { this.dismiss(token); return; }
-    const item = menu.groups.flatMap((group) => group.items)[index];
+    const item = flattenMenuActions(menu.groups)[index];
     if (!item || item.disabled) return;
     this.finish(token, "activate", item.restoreFocus !== false);
     item.onClick?.();

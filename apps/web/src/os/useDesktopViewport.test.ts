@@ -156,11 +156,11 @@ test("observer cleanup removes every listener and cancels a queued RAF", () => {
   assert.equal(runtime.frames.size, 0);
 });
 
-test("desktop preferences deduct only persistent menu bar and dock chrome", () => {
+test("desktop workarea reserves no top menu bar and deducts only the persistent dock", () => {
   const viewport = { x: 0, y: 0, w: 1200, h: 800 };
   assert.deepEqual(
     desktopWorkareaFromPreferences(viewport, DEFAULT_DESKTOP_PREFERENCES),
-    { x: 0, y: 24, w: 1200, h: 728 },
+    { x: 0, y: 0, w: 1200, h: 752 },
   );
   assert.deepEqual(
     desktopWorkareaFromPreferences(viewport, {
@@ -169,10 +169,6 @@ test("desktop preferences deduct only persistent menu bar and dock chrome", () =
         ...DEFAULT_DESKTOP_PREFERENCES.dock,
         autoHide: true,
         position: "left",
-      },
-      menuBar: {
-        ...DEFAULT_DESKTOP_PREFERENCES.menuBar,
-        hideMode: "desktop-only",
       },
     }),
     viewport,
@@ -185,11 +181,7 @@ test("desktop preferences deduct only persistent menu bar and dock chrome", () =
         position: "right",
         size: 60,
       },
-      menuBar: {
-        ...DEFAULT_DESKTOP_PREFERENCES.menuBar,
-        hideMode: "never",
-      },
     }),
-    { x: 0, y: 24, w: 1140, h: 776 },
+    { x: 0, y: 0, w: 1140, h: 800 },
   );
 });

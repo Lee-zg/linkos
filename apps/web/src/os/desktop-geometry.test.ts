@@ -360,7 +360,7 @@ test("resize sanitizes non-finite input instead of returning non-finite values",
   );
 });
 
-test("workarea combines safe insets with persistent menu bar and three dock sides", () => {
+test("workarea ignores legacy menu bar input and combines safe insets with three dock sides", () => {
   const viewport = { x: 10, y: 20, w: 1000, h: 700 };
   const base = {
     menuBar: { persistent: true, size: 24 },
@@ -371,21 +371,21 @@ test("workarea combines safe insets with persistent menu bar and three dock side
       ...base,
       dock: { persistent: true, position: "bottom", size: 48 },
     }),
-    { x: 23, y: 54, w: 976, h: 606 },
+    { x: 23, y: 30, w: 976, h: 630 },
   );
   assert.deepEqual(
     computeDesktopWorkarea(viewport, {
       ...base,
       dock: { persistent: true, position: "left", size: 48 },
     }),
-    { x: 71, y: 54, w: 928, h: 654 },
+    { x: 71, y: 30, w: 928, h: 678 },
   );
   assert.deepEqual(
     computeDesktopWorkarea(viewport, {
       ...base,
       dock: { persistent: true, position: "right", size: 48 },
     }),
-    { x: 23, y: 54, w: 928, h: 654 },
+    { x: 23, y: 30, w: 928, h: 678 },
   );
 });
 
@@ -394,7 +394,6 @@ test("workarea ignores auto-hidden chrome and clamps tiny viewports to zero size
     computeDesktopWorkarea(
       { x: 4, y: 6, w: 20, h: 10 },
       {
-        menuBar: { persistent: false, size: 30 },
         dock: { persistent: false, position: "bottom", size: 90 },
         safeInsets: { top: 8, right: 30, bottom: 8, left: 30 },
       },

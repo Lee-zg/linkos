@@ -57,12 +57,22 @@ const identity = (
   userId: string,
 ): DesktopPreferencesIdentity => ({ gateway, workspaceId, userId });
 
-test("兼容默认仅在全屏自动隐藏菜单栏", () => {
-  assert.equal(DEFAULT_DESKTOP_PREFERENCES.menuBar.hideMode, "fullscreen-only");
-  assert.equal(
-    parseDesktopPreferences("{bad json").menuBar.hideMode,
-    "fullscreen-only",
-  );
+test("removed menu bar preferences are ignored without resetting other saved settings", () => {
+  assert.equal("menuBar" in DEFAULT_DESKTOP_PREFERENCES, false);
+  assert.equal("menuBar" in parseDesktopPreferences("{bad json"), false);
+  for (const menuBar of [{ hideMode: "never", showBackground: true }, "legacy-invalid"]) {
+    const parsed = parseDesktopPreferences(JSON.stringify({
+      version: 1,
+      dock: { size: 64, position: "right" },
+      window: { doubleClick: "minimize", fillByDraggingToMenuBar: true },
+      menuBar,
+    }));
+    assert.equal("menuBar" in parsed, false);
+    assert.equal("fillByDraggingToMenuBar" in parsed.window, false);
+    assert.equal(parsed.dock.size, 64);
+    assert.equal(parsed.dock.position, "right");
+    assert.equal(parsed.window.doubleClick, "minimize");
+  }
 });
 
 test("invalid JSON, enums, non-finite numbers, ranges, and versions fall back to defaults", () => {

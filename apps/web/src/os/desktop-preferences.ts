@@ -23,14 +23,9 @@ export type DesktopPreferencesV1 = {
   window: {
     doubleClick: "fill" | "zoom" | "minimize" | "none";
     tileByDragging: boolean;
-    fillByDraggingToMenuBar: boolean;
     optionAcceleratesTiling: boolean;
     tileMargins: boolean;
     topEdgeOpensOverview: boolean;
-  };
-  menuBar: {
-    hideMode: "always" | "desktop-only" | "fullscreen-only" | "never";
-    showBackground: boolean;
   };
   missionControl: {
     switchToAppSpace: boolean;
@@ -57,12 +52,10 @@ export const DEFAULT_DESKTOP_PREFERENCES: DesktopPreferencesV1 = {
   window: {
     doubleClick: "fill",
     tileByDragging: true,
-    fillByDraggingToMenuBar: true,
     optionAcceleratesTiling: false,
     tileMargins: true,
     topEdgeOpensOverview: false,
   },
-  menuBar: { hideMode: "fullscreen-only", showBackground: true },
   missionControl: {
     switchToAppSpace: true,
     sortSpacesByRecentUse: true,
@@ -77,7 +70,6 @@ function defaults(): DesktopPreferencesV1 {
     ...DEFAULT_DESKTOP_PREFERENCES,
     dock: { ...DEFAULT_DESKTOP_PREFERENCES.dock },
     window: { ...DEFAULT_DESKTOP_PREFERENCES.window },
-    menuBar: { ...DEFAULT_DESKTOP_PREFERENCES.menuBar },
     missionControl: { ...DEFAULT_DESKTOP_PREFERENCES.missionControl },
   };
 }
@@ -141,9 +133,8 @@ export function validateDesktopPreferences(
   if (!isRecord(value) || value.version !== 1) return null;
   const dock = section(value, "dock");
   const window = section(value, "window");
-  const menuBar = section(value, "menuBar");
   const missionControl = section(value, "missionControl");
-  if (!dock || !window || !menuBar || !missionControl) return null;
+  if (!dock || !window || !missionControl) return null;
 
   if (
     !optionalNumber(dock, "size", 24, 80) ||
@@ -163,17 +154,9 @@ export function validateDesktopPreferences(
       "none",
     ]) ||
     !optionalBoolean(window, "tileByDragging") ||
-    !optionalBoolean(window, "fillByDraggingToMenuBar") ||
     !optionalBoolean(window, "optionAcceleratesTiling") ||
     !optionalBoolean(window, "tileMargins") ||
     !optionalBoolean(window, "topEdgeOpensOverview") ||
-    !optionalEnum(menuBar, "hideMode", [
-      "always",
-      "desktop-only",
-      "fullscreen-only",
-      "never",
-    ]) ||
-    !optionalBoolean(menuBar, "showBackground") ||
     !optionalBoolean(missionControl, "switchToAppSpace") ||
     !optionalBoolean(missionControl, "sortSpacesByRecentUse")
   ) {
@@ -221,9 +204,6 @@ export function validateDesktopPreferences(
       tileByDragging:
         (window.tileByDragging as boolean | undefined) ??
         result.window.tileByDragging,
-      fillByDraggingToMenuBar:
-        (window.fillByDraggingToMenuBar as boolean | undefined) ??
-        result.window.fillByDraggingToMenuBar,
       optionAcceleratesTiling:
         (window.optionAcceleratesTiling as boolean | undefined) ??
         result.window.optionAcceleratesTiling,
@@ -233,15 +213,6 @@ export function validateDesktopPreferences(
       topEdgeOpensOverview:
         (window.topEdgeOpensOverview as boolean | undefined) ??
         result.window.topEdgeOpensOverview,
-    },
-    menuBar: {
-      hideMode:
-        (menuBar.hideMode as
-          DesktopPreferencesV1["menuBar"]["hideMode"] | undefined) ??
-        result.menuBar.hideMode,
-      showBackground:
-        (menuBar.showBackground as boolean | undefined) ??
-        result.menuBar.showBackground,
     },
     missionControl: {
       switchToAppSpace:

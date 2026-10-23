@@ -10,7 +10,6 @@ export type Size = { w: number; h: number };
 export type Point = { x: number; y: number };
 
 export type DesktopWorkareaOptions = {
-  menuBar?: { persistent: boolean; size: number };
   dock?: {
     persistent: boolean;
     position: "bottom" | "left" | "right";
@@ -237,11 +236,6 @@ export function computeDesktopWorkarea(
     h: viewport.h - topInset - bottomInset,
   };
 
-  if (options.menuBar?.persistent) {
-    const size = Math.min(finiteNonNegative(options.menuBar.size), result.h);
-    result.y += size;
-    result.h -= size;
-  }
   if (options.dock?.persistent) {
     const size = finiteNonNegative(options.dock.size);
     if (options.dock.position === "left") {
